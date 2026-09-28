@@ -248,6 +248,7 @@ struct ContentView: View {
     @State private var hoverClickLocalMonitor: Any?
     @State private var stickyTerminalClickMonitor: Any?
     @State private var hiddenEdgeHoverPollingTask: Task<Void, Never>?
+    @State private var hiddenEdgeMouseMonitor: Any?
     @State private var isHoveringClosedMusicWaveformControl: Bool = false
 
     @State private var gestureProgress: CGFloat = .zero
@@ -2168,11 +2169,19 @@ struct ContentView: View {
     }
 
     private func startHiddenEdgeHoverPolling() {
-        guard hiddenEdgeHoverPollingTask == nil else { return }
+        guard hiddenEdgeMouseMonitor == nil else { return }
         guard shouldUseHiddenEdgeHoverPolling || (isHovering && interactionsEnabled) else { return }
 
-        hiddenEdgeHoverPollingTask = Task { @MainActor in
-            while !Task.isCancelled {
+        // Perform single initial check
+        if self.shouldUseHiddenEdgeHoverPolling {
+            let hovering = self.hiddenHoverActivationContainsMouse()
+            if hovering != self.isHovering {
+                self.handleHover(hovering)
+            }
+        }
+
+        hiddenEdgeMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+            Task { @MainActor in
                 if self.shouldUseHiddenEdgeHoverPolling {
                     let hovering = self.hiddenHoverActivationContainsMouse()
                     if hovering != self.isHovering {
@@ -2186,29 +2195,20 @@ struct ContentView: View {
                         self.hoverTask?.cancel()
                         self.stopHoverClickMonitor()
                         self.finishHoverExit()
+                        self.stopHiddenEdgeHoverPolling()
                     }
                 } else {
-                    break
+                    self.stopHiddenEdgeHoverPolling()
                 }
-
-                try? await Task.sleep(for: .milliseconds(self.hiddenEdgeHoverPollingIntervalMs()))
             }
-
-            self.hiddenEdgeHoverPollingTask = nil
         }
-    }
-
-    private func hiddenEdgeHoverPollingIntervalMs() -> Int {
-        if shouldUseHiddenEdgeHoverPolling {
-            return 50
-        }
-        if isHovering && interactionsEnabled {
-            return 100
-        }
-        return 5_000
     }
 
     private func stopHiddenEdgeHoverPolling() {
+        if let monitor = hiddenEdgeMouseMonitor {
+            NSEvent.removeMonitor(monitor)
+            hiddenEdgeMouseMonitor = nil
+        }
         hiddenEdgeHoverPollingTask?.cancel()
         hiddenEdgeHoverPollingTask = nil
     }

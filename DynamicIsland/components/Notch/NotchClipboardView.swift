@@ -104,8 +104,11 @@ struct NotchClipboardView: View {
             vm.setAutoCloseSuppression(isShowing, token: autoCloseToken)
         }
         .onAppear {
-            if Defaults[.enableClipboardManager], !clipboardManager.isMonitoring {
-                clipboardManager.startMonitoring()
+            if Defaults[.enableClipboardManager] {
+                if !clipboardManager.isMonitoring {
+                    clipboardManager.startMonitoring()
+                }
+                clipboardManager.checkClipboard()
             }
         }
     }

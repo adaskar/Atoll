@@ -60,10 +60,17 @@ class CalendarManager: ObservableObject {
     var hasCalendarAccess: Bool { isAuthorized(calendarAuthorizationStatus) }
     var hasReminderAccess: Bool { isAuthorized(reminderAuthorizationStatus) }
 
+    private var lockObserver: NSObjectProtocol?
+    private var unlockObserver: NSObjectProtocol?
+
     private init() {
         currentWeekStartDate = CalendarManager.startOfDay(Date())
         setupEventStoreChangedObserver()
-        startLockScreenRefreshLoop()
+        setupLockScreenObservers()
+        if let dict = CGSessionCopyCurrentDictionary() as? [String: Any],
+           dict["CGSSessionScreenIsLocked"] as? Bool == true {
+            startLockScreenRefreshLoop()
+        }
         Task {
             await reloadCalendarAndReminderLists()
         }
@@ -72,6 +79,12 @@ class CalendarManager: ObservableObject {
     deinit {
         if let observer = eventStoreChangedObserver {
             NotificationCenter.default.removeObserver(observer)
+        }
+        if let lockObserver {
+            DistributedNotificationCenter.default().removeObserver(lockObserver)
+        }
+        if let unlockObserver {
+            DistributedNotificationCenter.default().removeObserver(unlockObserver)
         }
         pendingEventStoreRefreshTask?.cancel()
         lockScreenRefreshTask?.cancel()
@@ -344,6 +357,28 @@ class CalendarManager: ObservableObject {
         lastLockScreenEventsFetchDate = Date()
     }
 
+    private func setupLockScreenObservers() {
+        let dnc = DistributedNotificationCenter.default()
+        lockObserver = dnc.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsLocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.updateLockScreenEvents(force: true)
+                self.startLockScreenRefreshLoop()
+            }
+        }
+        unlockObserver = dnc.addObserver(
+            forName: NSNotification.Name("com.apple.screenIsUnlocked"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.stopLockScreenRefreshLoop()
+        }
+    }
+
     private func startLockScreenRefreshLoop() {
         lockScreenRefreshTask?.cancel()
         lockScreenRefreshTask = Task { [weak self] in
@@ -355,6 +390,11 @@ class CalendarManager: ObservableObject {
                 await self.updateLockScreenEvents(force: false)
             }
         }
+    }
+
+    private func stopLockScreenRefreshLoop() {
+        lockScreenRefreshTask?.cancel()
+        lockScreenRefreshTask = nil
     }
 
     private func updateEvents(force: Bool = false) async {

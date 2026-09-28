@@ -218,6 +218,9 @@ class ClipboardManager: ObservableObject {
     private var dragResetWork: DispatchWorkItem?
 
     private var timer: Timer?
+    private var activityMonitor: Any?
+    private var appActivationObserver: NSObjectProtocol?
+    private var delayedCheckWorkItem: DispatchWorkItem?
     private var lastChangeCount: Int = 0
     private var persistenceCancellable: AnyCancellable?
     
@@ -375,13 +378,69 @@ class ClipboardManager: ObservableObject {
         guard !isMonitoring else { return }
         
         isMonitoring = true
-        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        checkClipboard()
+
+        appActivationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.triggerActivityCheck()
+        }
+
+        activityMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.keyDown, .leftMouseUp, .rightMouseUp]
+        ) { [weak self] event in
+            self?.handleUserActivity(event)
+        }
+
+        // Fallback timer only if global event monitoring could not be registered
+        if activityMonitor == nil {
+            let timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+                let idle = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0) ?? .null)
+                if idle < 4.0 {
+                    self?.checkClipboard()
+                }
+            }
+            timer.tolerance = 1.0
+            self.timer = timer
+        }
+    }
+
+    private func handleUserActivity(_ event: NSEvent) {
+        if event.type == .keyDown {
+            // Only trigger check when Command modifier is held (e.g. Cmd+C, Cmd+X)
+            if event.modifierFlags.contains(.command) {
+                triggerActivityCheck()
+            }
+        } else {
+            // Mouse clicks can trigger copy via context menu or edit menu
+            triggerActivityCheck()
+        }
+    }
+
+    private func triggerActivityCheck() {
+        checkClipboard()
+        delayedCheckWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             self?.checkClipboard()
         }
+        delayedCheckWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
     
     func stopMonitoring() {
         isMonitoring = false
+        if let activityMonitor {
+            NSEvent.removeMonitor(activityMonitor)
+            self.activityMonitor = nil
+        }
+        if let appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(appActivationObserver)
+            self.appActivationObserver = nil
+        }
+        delayedCheckWorkItem?.cancel()
+        delayedCheckWorkItem = nil
         timer?.invalidate()
         timer = nil
     }
@@ -559,7 +618,7 @@ class ClipboardManager: ObservableObject {
     
     // MARK: - Private Methods
     
-    private func checkClipboard() {
+    func checkClipboard() {
         let currentChangeCount = NSPasteboard.general.changeCount
         
         guard currentChangeCount != lastChangeCount else { return }

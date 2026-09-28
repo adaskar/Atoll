@@ -410,10 +410,10 @@ class SystemOSDManager {
                     let sleepNs: UInt64
                     if stableChecks < 5 {
                         sleepNs = 500_000_000 // 500ms
-                    } else if stableChecks < 15 {
+                    } else if stableChecks < 10 {
                         sleepNs = 2_000_000_000 // 2s
                     } else {
-                        sleepNs = 15_000_000_000 // 15s steady state
+                        sleepNs = 120_000_000_000 // 120s steady state
                     }
                     try? await Task.sleep(nanoseconds: sleepNs)
                     continue
@@ -433,13 +433,13 @@ class SystemOSDManager {
                 stableChecks += 1
                 let intervalNs: UInt64
                 if currentPID == nil {
-                    intervalNs = 5_000_000_000 // 5s — helper not running
+                    intervalNs = 60_000_000_000 // 60s — helper not running (media keys wake it reactively)
                 } else if stableChecks < 5 {
                     intervalNs = 150_000_000 // 150ms — confirm suspend stuck
-                } else if stableChecks < 20 {
+                } else if stableChecks < 15 {
                     intervalNs = 500_000_000 // 500ms
                 } else {
-                    intervalNs = 15_000_000_000 // 15s — steady state
+                    intervalNs = 120_000_000_000 // 120s — steady state
                 }
                 try? await Task.sleep(nanoseconds: intervalNs)
             }

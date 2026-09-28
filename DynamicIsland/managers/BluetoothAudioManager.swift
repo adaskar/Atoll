@@ -202,13 +202,6 @@ class BluetoothAudioManager: ObservableObject {
             )
         }
 
-        dnc.addObserver(
-            self,
-            selector: #selector(handlePotentialAirPodsListeningModeNotification(_:)),
-            name: nil,
-            object: nil
-        )
-
         let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
         for name in listeningModeNotificationNames {
             CFNotificationCenterAddObserver(
@@ -261,15 +254,20 @@ class BluetoothAudioManager: ObservableObject {
     
     /// Starts polling for device connection changes (fallback mechanism)
     private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (60s interval)...")
-        
-        let timer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+        guard !connectedDevices.isEmpty else { return }
+        guard pollingTimer == nil else { return }
+        let timer = Timer.scheduledTimer(withTimeInterval: 600.0, repeats: true) { [weak self] _ in
             DispatchQueue.global(qos: .utility).async {
                 self?.checkForDeviceChanges()
             }
         }
-        timer.tolerance = 5.0
+        timer.tolerance = 30.0
         pollingTimer = timer
+    }
+
+    private func stopPollingForChanges() {
+        pollingTimer?.invalidate()
+        pollingTimer = nil
     }
     
     /// Checks for device connection/disconnection changes

@@ -32,13 +32,8 @@ final class MenuBarLayout: ObservableObject {
     /// treat that as "no constraint" rather than guessing.
     @Published private(set) var appMenusRightEdge: CGFloat?
 
-    /// Menus change with the frontmost app, and within an app as its windows
-    /// change, so a slow poll backs up the activation notice. It runs only
-    /// while something actually needs the measurement.
-    private static let pollInterval: TimeInterval = 30
-
     private var observer: NSObjectProtocol?
-    private var pollTimer: Timer?
+    private var screenObserver: NSObjectProtocol?
     private var trackers = 0
     private var inFlight = false
 
@@ -83,12 +78,13 @@ final class MenuBarLayout: ObservableObject {
             MainActor.assumeIsolated { self?.refresh() }
         }
 
-        let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refresh() }
         }
-        timer.tolerance = 5.0
-        RunLoop.main.add(timer, forMode: .common)
-        pollTimer = timer
 
         refresh()
     }
@@ -102,8 +98,10 @@ final class MenuBarLayout: ObservableObject {
             NSWorkspace.shared.notificationCenter.removeObserver(observer)
             self.observer = nil
         }
-        pollTimer?.invalidate()
-        pollTimer = nil
+        if let screenObserver {
+            NotificationCenter.default.removeObserver(screenObserver)
+            self.screenObserver = nil
+        }
         appMenusRightEdge = nil
     }
 
