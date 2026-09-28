@@ -538,9 +538,7 @@ class StatsManager: ObservableObject {
             if notchIsOpen && currentView != "stats" {
                 scheduleDelayedStop(after: tabSwitchStopDelay)
             } else if !notchIsOpen {
-                if Defaults[.statsStopWhenNotchCloses] {
-                    scheduleDelayedStop(after: notchCloseStopDelay)
-                }
+                stopMonitoring()
             } else {
                 scheduleDelayedStop(after: tabSwitchStopDelay)
             }

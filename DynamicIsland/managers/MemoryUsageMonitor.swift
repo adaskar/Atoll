@@ -29,16 +29,14 @@ final class MemoryUsageMonitor {
 #else
     private let thresholdBytes: UInt64 = 1_024 * 1_024 * 1_024
 #endif
-    private let pollInterval: TimeInterval = 300 // 5 minutes to eliminate idle wakeups
     private let restartCooldown: TimeInterval = 300
     private let logSampleInterval: TimeInterval = 300
-    private var monitorTask: Task<Void, Never>?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var lastRestartAttempt: Date = .distantPast
     private var lastLogSample: Date = .distantPast
 
     func startMonitoring() {
-        guard monitorTask == nil else { return }
+        guard memoryPressureSource == nil else { return }
 
         let pressure = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
         pressure.setEventHandler { [weak self] in
@@ -49,24 +47,15 @@ final class MemoryUsageMonitor {
         pressure.resume()
         memoryPressureSource = pressure
 
-        monitorTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
-                do {
-                    try await Task.sleep(for: .seconds(self.pollInterval))
-                } catch {
-                    break
-                }
-                await self.evaluateMemoryFootprint()
-            }
+        // One-time baseline evaluation at launch
+        Task { [weak self] in
+            await self?.evaluateMemoryFootprint()
         }
     }
 
     func stopMonitoring() {
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
-        monitorTask?.cancel()
-        monitorTask = nil
     }
 
     private func evaluateMemoryFootprint() async {

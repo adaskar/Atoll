@@ -394,17 +394,6 @@ class ClipboardManager: ObservableObject {
             self?.handleUserActivity(event)
         }
 
-        // Fallback timer only if global event monitoring could not be registered
-        if activityMonitor == nil {
-            let timer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-                let idle = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: CGEventType(rawValue: ~0) ?? .null)
-                if idle < 4.0 {
-                    self?.checkClipboard()
-                }
-            }
-            timer.tolerance = 1.0
-            self.timer = timer
-        }
     }
 
     private func handleUserActivity(_ event: NSEvent) {

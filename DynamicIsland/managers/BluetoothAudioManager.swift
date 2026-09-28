@@ -111,8 +111,6 @@ class BluetoothAudioManager: ObservableObject {
         Notification.Name("com.apple.AudioAccessory.prefsChanged"),
         Notification.Name("com.apple.AudioAccessory.daemonStarted"),
         Notification.Name("com.apple.AudioAccessory.cdMsgNotification"),
-        Notification.Name("com.apple.bluetooth.status"),
-        Notification.Name("com.apple.Bluetooth.StatusNotification"),
         Notification.Name("com.apple.Bluetooth.DeviceUpdated"),
         Notification.Name("com.apple.Bluetooth.DeviceChanged"),
         Notification.Name("com.apple.Bluetooth.DevicePropertiesChanged"),
@@ -129,7 +127,6 @@ class BluetoothAudioManager: ObservableObject {
     private init() {
         print("🎧 [BluetoothAudioManager] Initializing...")
         setupBluetoothObservers()
-        setupAirPodsListeningModeObservers()
         setupAirPodsListeningModeLogObserver()
         startPollingForChanges()
 
@@ -186,11 +183,15 @@ class BluetoothAudioManager: ObservableObject {
         print("🎧 [BluetoothAudioManager] ✅ Observers registered with DistributedNotificationCenter")
     }
 
+    private var airPodsObserversInstalled = false
+
     /// Watches private Bluetooth/Control Center notifications that Apple posts
     /// when AirPods device properties change. The actual keys are OS-version
     /// dependent, so the handler parses the payload first and then falls back to
     /// a one-shot IORegistry read triggered by the event.
     private func setupAirPodsListeningModeObservers() {
+        guard !airPodsObserversInstalled else { return }
+        airPodsObserversInstalled = true
         let dnc = DistributedNotificationCenter.default()
 
         for name in listeningModeNotificationNames {
@@ -220,11 +221,31 @@ class BluetoothAudioManager: ObservableObject {
         }
     }
 
+    private func removeAirPodsListeningModeObservers() {
+        guard airPodsObserversInstalled else { return }
+        airPodsObserversInstalled = false
+        let dnc = DistributedNotificationCenter.default()
+        for name in listeningModeNotificationNames {
+            dnc.removeObserver(self, name: name, object: nil)
+        }
+        let darwinCenter = CFNotificationCenterGetDarwinNotifyCenter()
+        for name in listeningModeNotificationNames {
+            CFNotificationCenterRemoveObserver(
+                darwinCenter,
+                Unmanaged.passUnretained(self).toOpaque(),
+                CFNotificationName(name.rawValue as CFString),
+                nil
+            )
+        }
+    }
+
     private func updateAirPodsListeningModeObserverState(hasAirPods: Bool? = nil) {
         let airPodsConnected = hasAirPods ?? connectedDevices.contains { $0.deviceType.isAirPods }
         if airPodsConnected && Defaults[.showAirPodsListeningModeChanges] {
+            setupAirPodsListeningModeObservers()
             listeningModeLogObserver.start()
         } else {
+            removeAirPodsListeningModeObservers()
             listeningModeLogObserver.stop()
         }
     }
