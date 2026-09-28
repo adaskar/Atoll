@@ -189,6 +189,31 @@ class PrivacyIndicatorManager: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        // Bind camera monitor
+        Defaults.publisher(.enableCameraDetection, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                guard let self = self, self.isMonitoring else { return }
+                if change.newValue && self.cameraMonitor.isMonitoringAvailable {
+                    self.cameraMonitor.startMonitoring()
+                } else {
+                    self.cameraMonitor.stopMonitoring()
+                }
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableMicrophoneDetection, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                guard let self = self, self.isMonitoring else { return }
+                if change.newValue && self.microphoneMonitor.isMonitoringAvailable {
+                    self.microphoneMonitor.startMonitoring()
+                } else {
+                    self.microphoneMonitor.stopMonitoring()
+                }
+            }
+            .store(in: &cancellables)
     }
     
     /// Log layout changes for debugging
@@ -206,17 +231,17 @@ class PrivacyIndicatorManager: ObservableObject {
         isMonitoring = true
         
         // Start camera monitoring
-        if cameraMonitor.isMonitoringAvailable {
+        if Defaults[.enableCameraDetection] && cameraMonitor.isMonitoringAvailable {
             cameraMonitor.startMonitoring()
         } else {
-            print("PrivacyIndicatorManager: ⚠️ Camera monitoring not available")
+            cameraMonitor.stopMonitoring()
         }
         
         // Start microphone monitoring
-        if microphoneMonitor.isMonitoringAvailable {
+        if Defaults[.enableMicrophoneDetection] && microphoneMonitor.isMonitoringAvailable {
             microphoneMonitor.startMonitoring()
         } else {
-            print("PrivacyIndicatorManager: ⚠️ Microphone monitoring not available")
+            microphoneMonitor.stopMonitoring()
         }
         
         // Screen recording is already monitored by ScreenRecordingManager

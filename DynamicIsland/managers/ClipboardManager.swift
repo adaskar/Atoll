@@ -389,7 +389,7 @@ class ClipboardManager: ObservableObject {
         }
 
         activityMonitor = NSEvent.addGlobalMonitorForEvents(
-            matching: [.keyDown, .leftMouseUp, .rightMouseUp]
+            matching: [.keyDown, .rightMouseUp]
         ) { [weak self] event in
             self?.handleUserActivity(event)
         }
@@ -398,24 +398,32 @@ class ClipboardManager: ObservableObject {
 
     private func handleUserActivity(_ event: NSEvent) {
         if event.type == .keyDown {
-            // Only trigger check when Command modifier is held (e.g. Cmd+C, Cmd+X)
-            if event.modifierFlags.contains(.command) {
-                triggerActivityCheck()
-            }
-        } else {
-            // Mouse clicks can trigger copy via context menu or edit menu
+            // Only trigger check for copy / cut shortcuts (Cmd+C, Cmd+X)
+            guard event.modifierFlags.contains(.command) else { return }
+            guard let chars = event.charactersIgnoringModifiers?.lowercased(),
+                  chars == "c" || chars == "x" else { return }
+            triggerActivityCheck()
+        } else if event.type == .rightMouseUp {
+            // Context menu copy
             triggerActivityCheck()
         }
     }
 
     private func triggerActivityCheck() {
+        let initialCount = lastChangeCount
         checkClipboard()
+        // If changeCount already changed, no delayed check is needed
+        guard lastChangeCount == initialCount else { return }
+
         delayedCheckWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.checkClipboard()
+            guard let self else { return }
+            if NSPasteboard.general.changeCount != initialCount {
+                self.checkClipboard()
+            }
         }
         delayedCheckWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: work)
     }
     
     func stopMonitoring() {
