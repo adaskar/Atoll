@@ -11,7 +11,7 @@
 import AppKit
 import CoreWLAN
 import Foundation
-import Network
+import SystemConfiguration
 
 enum ConnectivityHUDState: Equatable {
     case hidden
@@ -40,7 +40,7 @@ final class NetworkConnectivityManager: NSObject, ObservableObject, CWEventDeleg
 
     @Published private(set) var hudState: ConnectivityHUDState = .hidden
 
-    private let pathMonitor = NWPathMonitor()
+    private var reachability: SCNetworkReachability?
     private let monitorQueue = DispatchQueue(label: "com.atoll.network-connectivity", qos: .utility)
     private let wiFiClient = CWWiFiClient.shared()
 
@@ -63,41 +63,79 @@ final class NetworkConnectivityManager: NSObject, ObservableObject, CWEventDeleg
         guard !hasStarted else { return }
         hasStarted = true
 
-        pathMonitor.pathUpdateHandler = { [weak self] path in
-            guard let self else { return }
-            let isSatisfied = path.status == .satisfied
-            let usesWiFi = isSatisfied && path.usesInterfaceType(.wifi)
-            // `isExpensive` is the only Network framework signal exposed for
-            // Personal Hotspot. Exclude constrained paths so Low Data Mode on
-            // an ordinary Wi‑Fi network does not get the hotspot icon.
-            let isHotspot = usesWiFi && path.isExpensive && !path.isConstrained
-            let wiFiName = usesWiFi ? self.currentWiFiName() : nil
+        var zeroAddress = sockaddr_in()
+        zeroAddress.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        zeroAddress.sin_family = sa_family_t(AF_INET)
 
-            DispatchQueue.main.async { [weak self] in
-                self?.handlePathUpdate(
-                    isSatisfied: isSatisfied,
-                    usesWiFi: usesWiFi,
-                    isHotspot: isHotspot,
-                    wiFiName: wiFiName
-                )
+        guard let reach = withUnsafePointer(to: &zeroAddress, {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                SCNetworkReachabilityCreateWithAddress(nil, $0)
             }
+        }) else { return }
+
+        self.reachability = reach
+
+        var context = SCNetworkReachabilityContext(
+            version: 0,
+            info: Unmanaged.passUnretained(self).toOpaque(),
+            retain: nil,
+            release: nil,
+            copyDescription: nil
+        )
+
+        SCNetworkReachabilitySetCallback(reach, { _, flags, info in
+            guard let info else { return }
+            let manager = Unmanaged<NetworkConnectivityManager>.fromOpaque(info).takeUnretainedValue()
+            manager.processReachabilityChange(flags: flags)
+        }, &context)
+
+        SCNetworkReachabilitySetDispatchQueue(reach, monitorQueue)
+
+        // Evaluate initial state
+        var initialFlags = SCNetworkReachabilityFlags()
+        if SCNetworkReachabilityGetFlags(reach, &initialFlags) {
+            processReachabilityChange(flags: initialFlags)
         }
 
         wiFiClient.delegate = self
         try? wiFiClient.startMonitoringEvent(with: .ssidDidChange)
         try? wiFiClient.startMonitoringEvent(with: .linkDidChange)
-        pathMonitor.start(queue: monitorQueue)
     }
 
     func stopMonitoring() {
         guard hasStarted else { return }
         hasStarted = false
-        pathMonitor.cancel()
+
+        if let reach = reachability {
+            SCNetworkReachabilitySetDispatchQueue(reach, nil)
+            SCNetworkReachabilitySetCallback(reach, nil, nil)
+            reachability = nil
+        }
+
         try? wiFiClient.stopMonitoringEvent(with: .ssidDidChange)
         try? wiFiClient.stopMonitoringEvent(with: .linkDidChange)
         wiFiClient.delegate = nil
         hideWorkItem?.cancel()
         hideWorkItem = nil
+    }
+
+    private func processReachabilityChange(flags: SCNetworkReachabilityFlags) {
+        let isReachable = flags.contains(.reachable)
+        let needsConnection = flags.contains(.connectionRequired)
+        let isSatisfied = isReachable && !needsConnection
+
+        let isHotspot = flags.contains(.transientConnection)
+        let wiFiName = isSatisfied ? currentWiFiName() : nil
+        let usesWiFi = isSatisfied && (wiFiName != nil || wiFiClient.interface()?.powerOn() == true)
+
+        DispatchQueue.main.async { [weak self] in
+            self?.handlePathUpdate(
+                isSatisfied: isSatisfied,
+                usesWiFi: usesWiFi,
+                isHotspot: isHotspot,
+                wiFiName: wiFiName
+            )
+        }
     }
 
     func dismissNoConnection() {
