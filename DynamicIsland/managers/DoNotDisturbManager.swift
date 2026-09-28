@@ -44,7 +44,8 @@ final class DoNotDisturbManager: ObservableObject {
     private let focusLogStream = FocusLogStream()
     private let assertionsURL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/DoNotDisturb/DB/Assertions.json")
-    private var pollingSource: DispatchSourceTimer?
+    private var assertionsFileSource: DispatchSourceFileSystemObject?
+    private var assertionsFileDescriptor: Int32 = -1
     private var lastAssertionsModificationDate: Date?
     private var modeCancellable: AnyCancellable?
     /// Periodic task that verifies focus is still active when `isDoNotDisturbActive` is true.
@@ -288,24 +289,20 @@ final class DoNotDisturbManager: ObservableObject {
         guard focusActive else { return }
 
         stateVerificationTask = Task { @MainActor [weak self] in
-            // Wait a bit before starting verification to let notifications settle.
-            try? await Task.sleep(for: .seconds(5))
+            // Wait 15 seconds to let notifications settle, then do a single sanity check
+            // instead of a continuous 3-second polling loop.
+            try? await Task.sleep(for: .seconds(15))
+            guard let self, !Task.isCancelled, self.isDoNotDisturbActive else { return }
 
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
-                guard let self, self.isDoNotDisturbActive else { break }
-
-                // Check the assertions file directly (if FDA is available).
-                let focusStillActive = await self.verifyFocusActiveFromAssertions()
-                if !focusStillActive {
-                    withAnimation(.smooth(duration: 0.25)) {
-                        self.isDoNotDisturbActive = false
-                    }
-                    self.scheduleMetadataClear()
-                    self.beginFocusToastDismissIfNeeded()
-                    debugPrint("[DoNotDisturbManager] State verification: focus no longer active, resetting.")
-                    break
+            // Check the assertions file directly (if FDA is available).
+            let focusStillActive = await self.verifyFocusActiveFromAssertions()
+            if !focusStillActive {
+                withAnimation(.smooth(duration: 0.25)) {
+                    self.isDoNotDisturbActive = false
                 }
+                self.scheduleMetadataClear()
+                self.beginFocusToastDismissIfNeeded()
+                debugPrint("[DoNotDisturbManager] State verification: focus no longer active, resetting.")
             }
         }
     }
@@ -585,18 +582,64 @@ private extension DoNotDisturbManager {
         stopAssertionsPolling()
         lastAssertionsModificationDate = nil
 
-        let timer = DispatchSource.makeTimerSource(queue: pollingQueue)
-        timer.schedule(deadline: .now() + .seconds(1), repeating: .seconds(2), leeway: .milliseconds(250))
-        timer.setEventHandler { [weak self] in
-            self?.pollAssertionsState()
+        // Initial state sync
+        pollAssertionsState()
+
+        guard FullDiskAccessAuthorization.hasPermission() else { return }
+
+        let path = assertionsURL.path
+        let fd = open(path, O_EVTONLY)
+        if fd != -1 {
+            assertionsFileDescriptor = fd
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .extend, .attrib, .rename, .delete],
+                queue: pollingQueue
+            )
+            source.setEventHandler { [weak self] in
+                self?.pollAssertionsState()
+            }
+            source.setCancelHandler { [weak self] in
+                guard let self, self.assertionsFileDescriptor != -1 else { return }
+                close(self.assertionsFileDescriptor)
+                self.assertionsFileDescriptor = -1
+            }
+            source.resume()
+            assertionsFileSource = source
+        } else {
+            // File does not exist yet; watch parent directory for creation
+            let dirPath = assertionsURL.deletingLastPathComponent().path
+            let dirFd = open(dirPath, O_EVTONLY)
+            guard dirFd != -1 else { return }
+            assertionsFileDescriptor = dirFd
+            let dirSource = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: dirFd,
+                eventMask: [.write, .extend, .attrib],
+                queue: pollingQueue
+            )
+            dirSource.setEventHandler { [weak self] in
+                self?.pollAssertionsState()
+                if FileManager.default.fileExists(atPath: path) {
+                    self?.startAssertionsPolling()
+                }
+            }
+            dirSource.setCancelHandler { [weak self] in
+                guard let self, self.assertionsFileDescriptor != -1 else { return }
+                close(self.assertionsFileDescriptor)
+                self.assertionsFileDescriptor = -1
+            }
+            dirSource.resume()
+            assertionsFileSource = dirSource
         }
-        timer.resume()
-        pollingSource = timer
     }
 
     func stopAssertionsPolling() {
-        pollingSource?.cancel()
-        pollingSource = nil
+        assertionsFileSource?.cancel()
+        assertionsFileSource = nil
+        if assertionsFileDescriptor != -1 {
+            close(assertionsFileDescriptor)
+            assertionsFileDescriptor = -1
+        }
         lastAssertionsModificationDate = nil
     }
 

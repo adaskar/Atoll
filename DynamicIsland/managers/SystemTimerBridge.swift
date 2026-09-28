@@ -193,13 +193,18 @@ final class SystemTimerBridge: ObservableObject {
             self.refreshMetadata()
             self.startFileMonitor()
 
-            // Only start the log stream if an active system timer is running
+            // Only start the log stream or ticker if an active system timer is running
             if self.metadata?.state.isActive == true {
                 let logStarted = self.startLogStream()
                 let hasAccessibility = AXIsProcessTrusted()
+                if !logStarted && hasAccessibility && self.ticker == nil {
+                    self.setupTicker()
+                }
                 self.logDebug("Log stream started: \(logStarted), AX trusted: \(hasAccessibility)")
             } else {
-                self.logDebug("No active system timer; log stream deferred to save CPU")
+                self.ticker?.cancel()
+                self.ticker = nil
+                self.logDebug("No active system timer; log stream and ticker deferred to save CPU")
             }
         }
     }
@@ -307,6 +312,8 @@ final class SystemTimerBridge: ObservableObject {
         do {
             try process.run()
             logProcess = process
+            ticker?.cancel()
+            ticker = nil
             logInfo("Log stream started (pid: \(process.processIdentifier))")
             return true
         } catch {
@@ -351,6 +358,8 @@ final class SystemTimerBridge: ObservableObject {
         // Only restart log stream if an active timer is running; stay idle if none
         guard metadata?.state.isActive == true else {
             logDebug("Log stream exited and no active timer running; staying idle")
+            ticker?.cancel()
+            ticker = nil
             return
         }
 
@@ -369,8 +378,16 @@ final class SystemTimerBridge: ObservableObject {
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
             self.logRestartWorkItem = nil
+            guard self.metadata?.state.isActive == true else {
+                self.ticker?.cancel()
+                self.ticker = nil
+                return
+            }
             let started = self.startLogStream()
-            if !started, AXIsProcessTrusted(), self.ticker == nil {
+            if started {
+                self.ticker?.cancel()
+                self.ticker = nil
+            } else if AXIsProcessTrusted(), self.ticker == nil {
                 self.setupTicker()
             }
         }
@@ -470,6 +487,10 @@ final class SystemTimerBridge: ObservableObject {
             if menuExtra == nil {
                 logDebug("Timer menu extra not found via AX")
                 handleMissingMenuExtra()
+                if metadata?.state.isActive != true && !TimerManager.shared.isExternalTimerActive {
+                    ticker?.cancel()
+                    ticker = nil
+                }
                 return
             }
             logDebug("Timer menu extra located via AX")
@@ -595,6 +616,8 @@ final class SystemTimerBridge: ObservableObject {
 
     private func handleMissingMenuExtra() {
         guard logIdentifier == nil else { return }
+        ticker?.cancel()
+        ticker = nil
         guard TimerManager.shared.isExternalTimerActive else { return }
 
         logDebug("Timer menu extra missing; ending external timer")
@@ -941,12 +964,20 @@ final class SystemTimerBridge: ObservableObject {
         if metadata?.state.isActive == true {
             if logProcess == nil {
                 logInfo("Active timer detected in preferences; starting log stream")
-                _ = startLogStream()
+                let started = startLogStream()
+                if !started, AXIsProcessTrusted(), ticker == nil {
+                    setupTicker()
+                }
             }
         } else {
             if logProcess != nil {
                 logInfo("No active timer in preferences; stopping log stream to save CPU")
                 stopLogStream()
+            }
+            if ticker != nil {
+                logInfo("No active timer in preferences; stopping ticker to save CPU")
+                ticker?.cancel()
+                ticker = nil
             }
         }
 
