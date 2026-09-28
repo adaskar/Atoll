@@ -114,10 +114,12 @@ struct LockScreenWeatherWidget: View {
 		}
 
 		private func startGeneralRefresh() {
+			guard isLocked else { return }
+			guard refreshTimer == nil else { return }
 			refreshTimer = Timer.scheduledTimer(withTimeInterval: 15.0, repeats: true) { [weak self] _ in
 				self?.fireNow()
 			}
-			refreshTimer?.tolerance = 0
+			refreshTimer?.tolerance = 2.0
 			if let refreshTimer {
 				RunLoop.main.add(refreshTimer, forMode: .common)
 			}
@@ -139,6 +141,7 @@ struct LockScreenWeatherWidget: View {
 			) { [weak self] _ in
 				guard let self else { return }
 				self.isLocked = true
+				self.startGeneralRefresh()
 				self.fireNow()
 				self.updateMinuteAlignedTimer()
 			}
@@ -150,6 +153,8 @@ struct LockScreenWeatherWidget: View {
 			) { [weak self] _ in
 				guard let self else { return }
 				self.isLocked = false
+				self.refreshTimer?.invalidate()
+				self.refreshTimer = nil
 				self.fireNow()
 				self.updateMinuteAlignedTimer()
 			}

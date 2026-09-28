@@ -35,7 +35,7 @@ final class MenuBarLayout: ObservableObject {
     /// Menus change with the frontmost app, and within an app as its windows
     /// change, so a slow poll backs up the activation notice. It runs only
     /// while something actually needs the measurement.
-    private static let pollInterval: TimeInterval = 3
+    private static let pollInterval: TimeInterval = 30
 
     private var observer: NSObjectProtocol?
     private var pollTimer: Timer?
@@ -86,6 +86,7 @@ final class MenuBarLayout: ObservableObject {
         let timer = Timer(timeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
+        timer.tolerance = 5.0
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
 

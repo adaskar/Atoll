@@ -943,6 +943,9 @@ struct ContentView: View {
                     enqueueMusicControlWindowSync(forceRefresh: true, delay: 0.05)
                 }
             }
+            .onChange(of: hideNonNotchUntilHover) { _, _ in
+                startHiddenEdgeHoverPolling()
+            }
             .onChange(of: lockScreenManager.isLocked) { _, locked in
                 if locked {
                     suppressMusicControlWindowUpdates()
@@ -2166,6 +2169,7 @@ struct ContentView: View {
 
     private func startHiddenEdgeHoverPolling() {
         guard hiddenEdgeHoverPollingTask == nil else { return }
+        guard shouldUseHiddenEdgeHoverPolling || (isHovering && interactionsEnabled) else { return }
 
         hiddenEdgeHoverPollingTask = Task { @MainActor in
             while !Task.isCancelled {
@@ -2183,6 +2187,8 @@ struct ContentView: View {
                         self.stopHoverClickMonitor()
                         self.finishHoverExit()
                     }
+                } else {
+                    break
                 }
 
                 try? await Task.sleep(for: .milliseconds(self.hiddenEdgeHoverPollingIntervalMs()))
@@ -2199,7 +2205,7 @@ struct ContentView: View {
         if isHovering && interactionsEnabled {
             return 100
         }
-        return 1_000
+        return 5_000
     }
 
     private func stopHiddenEdgeHoverPolling() {
@@ -2323,6 +2329,7 @@ struct ContentView: View {
         }
 
         if hovering {
+            startHiddenEdgeHoverPolling()
             withAnimation(.bouncy.speed(1.2)) {
                 isHovering = true
             }

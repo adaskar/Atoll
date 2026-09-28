@@ -193,31 +193,22 @@ final class SystemTimerBridge: ObservableObject {
             self.refreshMetadata()
             self.startFileMonitor()
 
-            let logStarted = self.startLogStream()
-            let hasAccessibility = AXIsProcessTrusted()
-
-            self.logDebug("Log stream started: \(logStarted), AX trusted: \(hasAccessibility)")
-
-            if !logStarted {
-                if hasAccessibility {
-                    self.logInfo("Falling back to Accessibility polling ticker")
-                    self.setupTicker()
-                } else {
-                    self.logError("Unable to start log stream and missing Accessibility permission; timer mirroring inactive")
-                    self.postAccessibilityWarningIfNeeded()
-                }
-            } else if !hasAccessibility {
-                self.logDebug("Log stream active but Accessibility not trusted; AX fallback disabled")
-                self.postAccessibilityWarningIfNeeded()
+            // Only start the log stream if an active system timer is running
+            if self.metadata?.state.isActive == true {
+                let logStarted = self.startLogStream()
+                let hasAccessibility = AXIsProcessTrusted()
+                self.logDebug("Log stream started: \(logStarted), AX trusted: \(hasAccessibility)")
+            } else {
+                self.logDebug("No active system timer; log stream deferred to save CPU")
             }
         }
     }
 
     private var isMonitoring: Bool {
-        logProcess != nil || ticker != nil || fileMonitor != nil
+        fileMonitor != nil
     }
 
-    private func stopMonitoring(clearTimer: Bool) {
+    func stopMonitoring(clearTimer: Bool = false) {
         queue.async { [weak self] in
             guard let self else { return }
             self.logInfo("Stopping monitoring pipeline (clearTimer: \(clearTimer))")
@@ -354,9 +345,16 @@ final class SystemTimerBridge: ObservableObject {
         logPipe = nil
         logProcess = nil
         logBuffer.removeAll(keepingCapacity: false)
-        logError("Log stream exited unexpectedly; scheduling restart")
 
         guard Defaults[.mirrorSystemTimer] else { return }
+
+        // Only restart log stream if an active timer is running; stay idle if none
+        guard metadata?.state.isActive == true else {
+            logDebug("Log stream exited and no active timer running; staying idle")
+            return
+        }
+
+        logError("Log stream exited unexpectedly; scheduling restart")
 
         if AXIsProcessTrusted(), ticker == nil {
             setupTicker()
@@ -939,6 +937,19 @@ final class SystemTimerBridge: ObservableObject {
             logDebug("No active metadata found in preferences")
         }
 
+        // Dynamically start or stop log stream based on active timer presence
+        if metadata?.state.isActive == true {
+            if logProcess == nil {
+                logInfo("Active timer detected in preferences; starting log stream")
+                _ = startLogStream()
+            }
+        } else {
+            if logProcess != nil {
+                logInfo("No active timer in preferences; stopping log stream to save CPU")
+                stopLogStream()
+            }
+        }
+
         guard let metadata, metadata != previous else { return }
 
         logDebug("Metadata updated from preferences (title: \(metadata.title), duration: \(metadata.duration))")
@@ -1284,5 +1295,9 @@ final class SystemTimerBridge: ObservableObject {
             }
         }
         return nil
+    }
+
+    deinit {
+        stopMonitoring(clearTimer: false)
     }
 }

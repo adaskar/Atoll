@@ -305,6 +305,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Stop AudioTap capture
         AudioTap.shared.stopCapture()
 
+        // Stop background monitors and child processes
+        SystemTimerBridge.shared.stopMonitoring(clearTimer: false)
+        BluetoothAudioManager.shared.cleanup()
+
         // Restore Lunar's native OSD if integration was active
         LunarManager.shared.appWillTerminate()
     }
@@ -746,6 +750,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Setup SystemHUD Manager
         SystemHUDManager.shared.setup(coordinator: coordinator)
+
+        // Clean up any orphaned log stream subprocesses from previous runs
+        let pkillTask = Process()
+        pkillTask.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        pkillTask.arguments = ["-f", "log stream.*(audioaccessoryd|mobiletimer)"]
+        try? pkillTask.run()
 
         // Setup BetterDisplay integration
         BetterDisplayManager.shared.configure(coordinator: coordinator)

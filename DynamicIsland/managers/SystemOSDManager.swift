@@ -368,6 +368,14 @@ class SystemOSDManager {
         }
     }
 
+    private static func isProcessAliveAndNamed(_ pid: pid_t, _ expectedName: String) -> Bool {
+        guard pid > 0 else { return false }
+        guard Darwin.kill(pid, 0) == 0 else { return false }
+        var name = [CChar](repeating: 0, count: Int(2 * MAXCOMLEN) + 1)
+        guard proc_name(pid, &name, UInt32(name.count)) > 0 else { return false }
+        return String(cString: name) == expectedName
+    }
+
     /// Background loop that catches OSDUIHelper respawns. macOS exits the
     /// helper after a short idle period (JETSAM_REASON_MEMORY_IDLE_EXIT) and
     /// launchd spins up a brand-new process on the next volume/brightness
@@ -388,15 +396,34 @@ class SystemOSDManager {
                 let sleeping = suppressionState.withLock { $0.systemSleeping }
                 if sleeping {
                     // Sleep in larger chunks so we respond to cancellation promptly.
-                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 1s
+                    try? await Task.sleep(nanoseconds: 5_000_000_000) // 5s
                     continue
                 }
 
-                let currentPID = osduiHelperPID()
                 let lastPID = suppressionState.withLock { $0.lastSuspendedPID }
 
+                // Fast check: if the known suspended PID is still alive and is OSDUIHelper,
+                // there is NO other OSDUIHelper (launchd never runs two simultaneously).
+                // Sleep quietly without scanning the system process table.
+                if lastPID > 0 && isProcessAliveAndNamed(lastPID, helperProcessName) {
+                    stableChecks += 1
+                    let sleepNs: UInt64
+                    if stableChecks < 5 {
+                        sleepNs = 500_000_000 // 500ms
+                    } else if stableChecks < 15 {
+                        sleepNs = 2_000_000_000 // 2s
+                    } else {
+                        sleepNs = 15_000_000_000 // 15s steady state
+                    }
+                    try? await Task.sleep(nanoseconds: sleepNs)
+                    continue
+                }
+
+                // If lastPID is dead or invalid, scan for the new PID
+                let currentPID = osduiHelperPID(forceScan: true)
+
                 if let pid = currentPID, pid != lastPID {
-                    suspendOSDUIHelper()
+                    suspendOSDUIHelper(pid: pid)
                     suppressionState.withLock { $0.lastSuspendedPID = pid }
                     stableChecks = 0
                     try? await Task.sleep(nanoseconds: 150_000_000) // 150ms
@@ -406,13 +433,13 @@ class SystemOSDManager {
                 stableChecks += 1
                 let intervalNs: UInt64
                 if currentPID == nil {
-                    intervalNs = 1_000_000_000 // 1s — helper not running
+                    intervalNs = 5_000_000_000 // 5s — helper not running
                 } else if stableChecks < 5 {
                     intervalNs = 150_000_000 // 150ms — confirm suspend stuck
                 } else if stableChecks < 20 {
                     intervalNs = 500_000_000 // 500ms
                 } else {
-                    intervalNs = 1_000_000_000 // 1s — steady state
+                    intervalNs = 15_000_000_000 // 15s — steady state
                 }
                 try? await Task.sleep(nanoseconds: intervalNs)
             }
@@ -442,12 +469,16 @@ class SystemOSDManager {
 
     /// Returns the newest OSDUIHelper PID, or nil if none.
     ///
-    /// Asked once a second for as long as the app runs, so it is deliberately
-    /// not `pgrep`. Shelling out costs a fork, an exec, a pipe and a process
-    /// reap -- measured at 67ms of wall time and ~5ms of CPU per call, which is
-    /// roughly half a percent of a core burned continuously, forever, to answer
-    /// a question the kernel will answer directly in 0.6ms.
-    private static func osduiHelperPID() -> Int32? {
+    /// Fast path checks if lastSuspendedPID is still valid and named OSDUIHelper.
+    /// Only scans the full process list when forceScan is requested or lastPID is invalid.
+    private static func osduiHelperPID(forceScan: Bool = false) -> Int32? {
+        if !forceScan {
+            let lastPID = suppressionState.withLock { $0.lastSuspendedPID }
+            if lastPID > 0, isProcessAliveAndNamed(lastPID, helperProcessName) {
+                return lastPID
+            }
+        }
+
         var byteCount = proc_listpids(UInt32(PROC_ALL_PIDS), 0, nil, 0)
         guard byteCount > 0 else { return nil }
 
@@ -489,7 +520,12 @@ class SystemOSDManager {
     private static let helperProcessName = "OSDUIHelper"
 
     /// Sends SIGSTOP to all OSDUIHelper processes. Idempotent.
-    private static func suspendOSDUIHelper() {
+    private static func suspendOSDUIHelper(pid: Int32? = nil) {
+        if let pid, pid > 0 {
+            if Darwin.kill(pid, SIGSTOP) == 0 {
+                return
+            }
+        }
         let stop = Process()
         stop.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         stop.arguments = ["-STOP", "OSDUIHelper"]
@@ -522,7 +558,12 @@ class SystemOSDManager {
         resumeOSDUIHelperProcess()
     }
 
-    private static func resumeOSDUIHelperProcess() {
+    private static func resumeOSDUIHelperProcess(pid: Int32? = nil) {
+        if let pid, pid > 0 {
+            if Darwin.kill(pid, SIGCONT) == 0 {
+                return
+            }
+        }
         let resume = Process()
         resume.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
         resume.arguments = ["-CONT", "OSDUIHelper"]

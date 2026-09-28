@@ -227,6 +227,15 @@ class BluetoothAudioManager: ObservableObject {
         }
     }
 
+    private func updateAirPodsListeningModeObserverState(hasAirPods: Bool? = nil) {
+        let airPodsConnected = hasAirPods ?? connectedDevices.contains { $0.deviceType.isAirPods }
+        if airPodsConnected && Defaults[.showAirPodsListeningModeChanges] {
+            listeningModeLogObserver.start()
+        } else {
+            listeningModeLogObserver.stop()
+        }
+    }
+
     private func setupAirPodsListeningModeLogObserver() {
         listeningModeLogObserver.onModeChange = { [weak self] mode, address in
             Task { @MainActor in
@@ -234,28 +243,33 @@ class BluetoothAudioManager: ObservableObject {
             }
         }
 
-        if Defaults[.showAirPodsListeningModeChanges] {
-            listeningModeLogObserver.start()
-        }
+        // Only stream logs if an AirPods device is actually connected
+        $connectedDevices
+            .map { devices in devices.contains { $0.deviceType.isAirPods } }
+            .removeDuplicates()
+            .sink { [weak self] hasAirPods in
+                self?.updateAirPodsListeningModeObserverState(hasAirPods: hasAirPods)
+            }
+            .store(in: &cancellables)
 
         Defaults.publisher(.showAirPodsListeningModeChanges, options: [])
-            .sink { [weak self] change in
-                if change.newValue {
-                    self?.listeningModeLogObserver.start()
-                } else {
-                    self?.listeningModeLogObserver.stop()
-                }
+            .sink { [weak self] _ in
+                self?.updateAirPodsListeningModeObserverState()
             }
             .store(in: &cancellables)
     }
     
     /// Starts polling for device connection changes (fallback mechanism)
     private func startPollingForChanges() {
-        print("🎧 [BluetoothAudioManager] Starting polling timer (3s interval)...")
+        print("🎧 [BluetoothAudioManager] Starting polling timer (60s interval)...")
         
-        pollingTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
-            self?.checkForDeviceChanges()
+        let timer = Timer.scheduledTimer(withTimeInterval: 60.0, repeats: true) { [weak self] _ in
+            DispatchQueue.global(qos: .utility).async {
+                self?.checkForDeviceChanges()
+            }
         }
+        timer.tolerance = 5.0
+        pollingTimer = timer
     }
     
     /// Checks for device connection/disconnection changes
@@ -2142,7 +2156,7 @@ class BluetoothAudioManager: ObservableObject {
     
     // MARK: - Cleanup
     
-    private func cleanup() {
+    public func cleanup() {
         print("🎧 [BluetoothAudioManager] Cleaning up observers...")
         
         pollingTimer?.invalidate()
@@ -2220,8 +2234,19 @@ private final class AirPodsListeningModeLogObserver {
     }
 
     func stop() {
-        process?.terminate()
+        if let proc = process {
+            proc.terminationHandler = nil
+            if proc.isRunning {
+                proc.terminate()
+                proc.waitUntilExit()
+            }
+        }
         process = nil
+        lineBuffer = ""
+    }
+
+    deinit {
+        stop()
     }
 
     private func consume(_ text: String) {

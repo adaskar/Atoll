@@ -29,7 +29,7 @@ final class MemoryUsageMonitor {
 #else
     private let thresholdBytes: UInt64 = 1_024 * 1_024 * 1_024
 #endif
-    private let pollInterval: TimeInterval = 8 // Clamp within 5-10 seconds to limit battery impact
+    private let pollInterval: TimeInterval = 60 // 60 seconds to limit battery impact
     private let restartCooldown: TimeInterval = 300
     private let logSampleInterval: TimeInterval = 300
     private var monitorTask: Task<Void, Never>?
