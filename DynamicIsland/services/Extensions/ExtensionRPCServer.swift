@@ -61,6 +61,7 @@ final class ExtensionRPCServer {
     // MARK: - Lifecycle
 
     func start() {
+        guard Defaults[.enableThirdPartyExtensions] else { return }
         shouldRun = true
         guard listeners.isEmpty else {
             logDiagnostics("RPC server already running")
@@ -99,6 +100,8 @@ final class ExtensionRPCServer {
 
     private func makeListener(boundTo host: NWEndpoint.Host) -> NWListener? {
         let params = NWParameters(tls: nil)
+        params.requiredInterfaceType = .loopback
+        params.prohibitedInterfaceTypes = [.cellular, .wifi, .wiredEthernet]
         let wsOptions = NWProtocolWebSocket.Options()
         wsOptions.autoReplyPing = true
         params.defaultProtocolStack.applicationProtocols.insert(wsOptions, at: 0)

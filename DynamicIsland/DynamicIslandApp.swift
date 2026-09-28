@@ -710,8 +710,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         LockScreenLiveActivityWindowManager.shared.configure(viewModel: vm)
         LockScreenManager.shared.configure(viewModel: vm)
-        extensionXPCServiceHost.start()
-        extensionRPCServer.start()
+        if Defaults[.enableThirdPartyExtensions] {
+            extensionXPCServiceHost.start()
+            extensionRPCServer.start()
+        }
+
+        Defaults.publisher(.enableThirdPartyExtensions, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                if change.newValue {
+                    self?.extensionXPCServiceHost.start()
+                    self?.extensionRPCServer.start()
+                } else {
+                    self?.extensionXPCServiceHost.stop()
+                    self?.extensionRPCServer.stop()
+                }
+            }
+            .store(in: &cancellables)
         
         // Migrate legacy progress bar settings
         Defaults.Keys.migrateProgressBarStyle()
