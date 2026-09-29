@@ -244,7 +244,6 @@ struct ContentView: View {
     @State private var hoverTask: Task<Void, Never>?
     @State private var isHovering: Bool = false
     @State private var lastHapticTime: Date = Date()
-    @State private var hoverClickMonitor: Any?
     @State private var hoverClickLocalMonitor: Any?
     @State private var stickyTerminalClickMonitor: Any?
     @State private var hiddenEdgeHoverPollingTask: Task<Void, Never>?
@@ -2224,7 +2223,7 @@ struct ContentView: View {
         guard Defaults[.openNotchOnHover] else { return }
         guard !isConnectivityHUDVisible else { return }
         guard !recordingLiveActivityVisibleOnClosedNotch else { return }
-        guard hoverClickMonitor == nil else { return }
+        guard hoverClickLocalMonitor == nil else { return }
 
         let handleClick: @Sendable () -> Void = { [weak vm, weak lockScreenManager] in
             MainActor.assumeIsolated {
@@ -2243,20 +2242,6 @@ struct ContentView: View {
             }
         }
 
-        // Global monitor catches clicks outside the app window (e.g. when
-        // the cursor is at the very top screen edge and the click goes to
-        // the system rather than our panel).
-        hoverClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { _ in
-            let location = NSEvent.mouseLocation
-            guard self.isMouseOverClosedNotchHitArea(location) else {
-                MainActor.assumeIsolated {
-                    self.stopHoverClickMonitor()
-                }
-                return
-            }
-            handleClick()
-        }
-
         // Local monitor catches clicks that DO hit our window — at the
         // screen edge SwiftUI's .onTapGesture may not fire reliably, but
         // the NSEvent local monitor will.
@@ -2267,10 +2252,6 @@ struct ContentView: View {
     }
 
     private func stopHoverClickMonitor() {
-        if let hoverClickMonitor {
-            NSEvent.removeMonitor(hoverClickMonitor)
-            self.hoverClickMonitor = nil
-        }
         if let hoverClickLocalMonitor {
             NSEvent.removeMonitor(hoverClickLocalMonitor)
             self.hoverClickLocalMonitor = nil
