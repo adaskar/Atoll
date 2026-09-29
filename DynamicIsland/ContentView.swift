@@ -866,9 +866,9 @@ struct ContentView: View {
             alignment: .top
         )
         .animation(nil, value: vm.notchState)
+        .background(dragDetector, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .environmentObject(privacyManager)
-        .background(dragDetector)
         .environmentObject(vm)
         .environmentObject(webcamManager)
     }
@@ -2077,8 +2077,11 @@ struct ContentView: View {
             EmptyView()
         } else if Defaults[.dynamicShelf] && !Defaults[.enableMinimalisticUI] {
             Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .contentShape(Rectangle())
+                .frame(
+                    width: vm.notchState == .open ? dynamicNotchSize.width : vm.closedNotchSize.width,
+                    height: vm.notchState == .open ? dynamicNotchSize.height : vm.effectiveClosedNotchHeight
+                )
+                .contentShape(resolvedClipShape)
                 .onDrop(of: [.data], isTargeted: $vm.dragDetectorTargeting) { _ in true }
                 .onChange(of: vm.anyDropZoneTargeting) { _, isTargeted in
                     if isTargeted, vm.notchState == .closed {

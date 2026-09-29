@@ -88,8 +88,53 @@ struct DynamicNotchApp: App {
 }
 
 final class FirstMouseHostingView<Content: View>: NSHostingView<Content> {
+    weak var viewModel: DynamicIslandViewModel?
+
+    @MainActor required init(rootView: Content) {
+        super.init(rootView: rootView)
+    }
+
+    @MainActor required dynamic init?(coder aDecoder: NSCoder) {
+        super.init(coder: aDecoder)
+    }
+
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard let vm = viewModel else { return super.hitTest(point) }
+
+        // Fast-path bounds check: When the notch is closed, only allow hit testing
+        // within the actual notch/HUD bounds at the top of the window.
+        // Outside this area, the window is fully transparent and clicks/drags must
+        // fall through to underlying windows (TextEdit, browser, etc.) immediately
+        // without waking SwiftUI or evaluating view hierarchies.
+        if vm.notchState == .closed {
+            var activeWidth = max(vm.closedNotchSize.width + 32, 96)
+            var activeHeight = vm.effectiveClosedNotchHeight + 16
+
+            let coordinator = DynamicIslandViewCoordinator.shared
+            if coordinator.sneakPeek.show || coordinator.expandingView.show {
+                activeWidth = max(activeWidth, 480)
+                activeHeight = max(activeHeight, 80)
+            }
+            if ScreenRecordingManager.shared.isRecording {
+                activeWidth = max(activeWidth, 320)
+                activeHeight = max(activeHeight, 70)
+            }
+
+            let minX = bounds.midX - activeWidth / 2
+            let maxX = bounds.midX + activeWidth / 2
+            let minY = bounds.height - activeHeight
+            let maxY = bounds.height
+
+            guard point.x >= minX, point.x <= maxX, point.y >= minY, point.y <= maxY else {
+                return nil
+            }
+        }
+
+        return super.hitTest(point)
     }
 }
 
@@ -429,12 +474,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.animationBehavior = .none
         // collectionBehavior is configured in DynamicIslandWindow.init
 
-        window.contentView = FirstMouseHostingView(
+        let hostingView = FirstMouseHostingView(
             rootView: ContentView()
                 .environmentObject(viewModel)
                 .environmentObject(webcamManager)
                 //.moveToSky()
         )
+        hostingView.viewModel = viewModel
+        window.contentView = hostingView
         
         window.orderFrontRegardless()
         NotchSpaceManager.shared.notchSpace.windows.insert(window)
