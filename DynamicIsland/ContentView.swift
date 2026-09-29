@@ -2227,7 +2227,7 @@ struct ContentView: View {
         guard hoverClickMonitor == nil else { return }
 
         let handleClick: @Sendable () -> Void = { [weak vm, weak lockScreenManager] in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let vm, let lockScreenManager else { return }
                 guard !lockScreenManager.isLocked else { return }
                 guard vm.notchState == .closed else { return }
@@ -2247,6 +2247,13 @@ struct ContentView: View {
         // the cursor is at the very top screen edge and the click goes to
         // the system rather than our panel).
         hoverClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { _ in
+            let location = NSEvent.mouseLocation
+            guard self.isMouseOverClosedNotchHitArea(location) else {
+                MainActor.assumeIsolated {
+                    self.stopHoverClickMonitor()
+                }
+                return
+            }
             handleClick()
         }
 
@@ -2292,12 +2299,10 @@ struct ContentView: View {
     private func installStickyTerminalClickMonitor() {
         guard stickyTerminalClickMonitor == nil else { return }
         stickyTerminalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak vm] _ in
-            Task { @MainActor in
+            MainActor.assumeIsolated {
                 guard let vm, vm.notchState == .open else { return }
                 let clickLocation = NSEvent.mouseLocation
-                if self.isPointInsideNotchWindow(clickLocation) {
-                    return
-                }
+                guard !self.isPointInsideNotchWindow(clickLocation) else { return }
                 vm.close()
             }
         }
