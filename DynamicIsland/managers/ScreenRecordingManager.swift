@@ -393,9 +393,13 @@ class ScreenRecordingManager: ObservableObject {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateScreenSharingAppState()
+        ) { [weak self] notification in
+            guard let self else { return }
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            let isActive = isScreenSharingApplication(app)
+            if isActive != self.isScreenSharingAppActive {
+                self.isScreenSharingAppActive = isActive
+                screenRecordingDebugLog("Screen sharing app active: \(isActive)")
             }
         }
 
@@ -403,9 +407,11 @@ class ScreenRecordingManager: ObservableObject {
             forName: NSWorkspace.didTerminateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateScreenSharingAppState()
+        ) { [weak self] notification in
+            guard let self, self.isScreenSharingAppActive else { return }
+            let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            if isScreenSharingApplication(app) {
+                self.updateScreenSharingAppState()
             }
         }
 

@@ -384,7 +384,10 @@ class ClipboardManager: ObservableObject {
             forName: NSWorkspace.didActivateApplicationNotification,
             object: nil,
             queue: .main
-        ) { [weak self] _ in
+        ) { [weak self] notification in
+            // Only query pasteboard if Atoll itself was brought to front
+            guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == Bundle.main.bundleIdentifier else { return }
             self?.checkClipboard()
         }
 
