@@ -164,15 +164,21 @@ class LockScreenManager: ObservableObject {
             object: nil
         )
 
+        print("LockScreenManager: ✅ Observers registered for lock/unlock events")
+    }
+
+    private func startMonitoringPowerKey() {
+        guard powerKeyMonitors.isEmpty else { return }
+        guard Defaults[.enableLockScreenLiveActivity],
+              Defaults[.lockScreenLiveActivityIconStyle].showsFingerprint else { return }
+
         // Power/Touch ID presses arrive as system-defined power-key events on
         // Macs that expose them outside Secure Input. Listen locally and
         // globally: global monitors do not receive events delivered to Atoll,
         // while local monitors only receive those events.
         if let localMonitor = NSEvent.addLocalMonitorForEvents(matching: .systemDefined) { [weak self] event in
             if event.subtype == .powerKey {
-                Task { @MainActor in
-                    self?.handlePowerKeyEvent()
-                }
+                self?.handlePowerKeyEvent()
             }
             return event
         } {
@@ -181,14 +187,15 @@ class LockScreenManager: ObservableObject {
 
         if let globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: .systemDefined) { [weak self] event in
             guard event.subtype == .powerKey else { return }
-            Task { @MainActor in
-                self?.handlePowerKeyEvent()
-            }
+            self?.handlePowerKeyEvent()
         } {
             powerKeyMonitors.append(globalMonitor)
         }
+    }
 
-        print("LockScreenManager: ✅ Observers registered for lock/unlock events")
+    private func stopMonitoringPowerKey() {
+        powerKeyMonitors.forEach(NSEvent.removeMonitor)
+        powerKeyMonitors.removeAll()
     }
 
     private func handlePowerKeyEvent() {
@@ -273,6 +280,7 @@ class LockScreenManager: ObservableObject {
         }
         
         startLockStatePolling()
+        startMonitoringPowerKey()
 
         print("[\(timestamp())] LockScreenManager: ✅ Lock screen activated")
     }
@@ -295,6 +303,7 @@ class LockScreenManager: ObservableObject {
         isLocked = false
         updateNativeHUDSuppression()
         stopLockStatePolling()
+        stopMonitoringPowerKey()
         postUnlockMusicHUDTask?.cancel()
         shouldDelayPostUnlockMusicHUD = Defaults[.enableLockScreenLiveActivity]
         let unlockRemovalDelay = LockScreenAnimationTimings.currentUnlockRemovalDelay
