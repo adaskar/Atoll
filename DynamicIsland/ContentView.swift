@@ -1011,20 +1011,29 @@ struct ContentView: View {
                 }
             }
             .onAppear {
-                if vm.notchState == .closed { menuBarLayout.startTracking() }
+                updateMenuBarTracking()
             }
-            .onChange(of: vm.notchState) { _, state in
-                // An open notch covers the menu bar wholesale and is the user's
-                // own doing, so there is nothing to step around while it is up.
-                if state == .closed {
-                    menuBarLayout.startTracking()
-                } else {
-                    menuBarLayout.stopTracking()
-                }
+            .onChange(of: vm.notchState) { _, _ in
+                updateMenuBarTracking()
+            }
+            .onChange(of: closedContentWidth) { _, _ in
+                updateMenuBarTracking()
             }
             .onDisappear {
                 performViewTeardown()
             }
+    }
+
+    private var hasActiveClosedNotchWings: Bool {
+        vm.notchState == .closed && !vm.hideOnClosed && closedContentWidth > vm.closedNotchSize.width
+    }
+
+    private func updateMenuBarTracking() {
+        if hasActiveClosedNotchWings {
+            menuBarLayout.startTracking()
+        } else {
+            menuBarLayout.stopTracking()
+        }
     }
 
     /// How far right the closed-notch content has to move so it stops covering
@@ -1040,9 +1049,7 @@ struct ContentView: View {
     /// open notch, no accessibility permission, or menus that end before the
     /// content begins all leave the notch centred where it belongs.
     private var menuBarClearanceOffset: CGFloat {
-        guard vm.notchState == .closed,
-              !vm.hideOnClosed,
-              closedContentWidth > 0,
+        guard hasActiveClosedNotchWings,
               let menusRightEdge = menuBarLayout.appMenusRightEdge,
               let screenFrame = getScreenFrame(currentScreenName)
         else { return 0 }

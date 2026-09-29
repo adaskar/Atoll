@@ -385,7 +385,7 @@ class ClipboardManager: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            self?.triggerActivityCheck()
+            self?.checkClipboard()
         }
 
         activityMonitor = NSEvent.addGlobalMonitorForEvents(
