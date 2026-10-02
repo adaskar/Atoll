@@ -441,6 +441,7 @@ class DynamicIslandViewModel: NSObject, ObservableObject {
     }
 
     func close() {
+        guard notchState == .open else { return }
         let targetSize = getClosedNotchSize(screen: screen)
         notchSize = targetSize
         closedNotchSize = targetSize
@@ -458,6 +459,7 @@ class DynamicIslandViewModel: NSObject, ObservableObject {
     }
 
     func closeForLockScreen() {
+        guard notchState == .open else { return }
         let targetSize = getClosedNotchSize(screen: screen)
         withAnimation(.none) {
             notchSize = targetSize

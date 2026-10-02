@@ -26,23 +26,38 @@ import LottieUI
 import Defaults
 
 struct LottieAnimationView: View {
-    let state1 = LUStateData(type: .loadedFrom(URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")!), speed: 1.0, loopMode: .loop)
+    @EnvironmentObject var vm: DynamicIslandViewModel
+    @ObservedObject var musicManager = MusicManager.shared
     @Default(.selectedVisualizer) var selectedVisualizer
+
+    private var shouldAnimate: Bool {
+        vm.notchState == .open && !vm.hideOnClosed && musicManager.isPlaying
+    }
+
     var body: some View {
-        if selectedVisualizer == nil {
-            LottieView(state: state1)
-        } else {
-            LottieView(
-                state: LUStateData(
-                    type: .loadedFrom(selectedVisualizer!.url),
-                    speed: selectedVisualizer!.speed,
-                    loopMode: .loop
+        if shouldAnimate {
+            if let selectedVisualizer {
+                LottieView(
+                    state: LUStateData(
+                        type: .loadedFrom(selectedVisualizer.url),
+                        speed: selectedVisualizer.speed,
+                        loopMode: .loop
+                    )
                 )
-            )
+            } else {
+                LottieView(
+                    state: LUStateData(
+                        type: .loadedFrom(URL(string: "https://assets9.lottiefiles.com/packages/lf20_mniampqn.json")!),
+                        speed: 1.0,
+                        loopMode: .loop
+                    )
+                )
+            }
         }
     }
 }
 
 #Preview {
     LottieAnimationView()
+        .environmentObject(DynamicIslandViewModel())
 }

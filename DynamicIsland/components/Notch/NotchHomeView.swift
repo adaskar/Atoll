@@ -549,7 +549,7 @@ struct MusicControlsView: View {
 
     /// Whether the progress timeline should be paused (no ticks).
     private var isProgressTimelinePaused: Bool {
-        !musicManager.isPlaying || musicManager.isLiveStream || musicManager.playbackRate <= 0
+        !musicManager.isPlaying || musicManager.isLiveStream || musicManager.playbackRate <= 0 || vm.notchState != .open
     }
 
     private var musicSlider: some View {
