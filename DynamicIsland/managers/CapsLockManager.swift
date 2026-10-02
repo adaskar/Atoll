@@ -45,9 +45,8 @@ class CapsLockManager: ObservableObject {
         
         // Monitor flag changes globally (even when app is not focused)
         globalEventMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            Task { @MainActor in
-                self?.handleFlagsChanged(event)
-            }
+            // NSEvent global monitor callbacks always fire on the main thread.
+            MainActor.assumeIsolated { self?.handleFlagsChanged(event) }
         }
         
         print("CapsLockManager: ✅ Initialized with Caps Lock \(isCapsLockActive ? "ON" : "OFF")")

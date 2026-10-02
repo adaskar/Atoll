@@ -467,9 +467,8 @@ class ScreenRecordingManager: ObservableObject {
         recordingDuration = 0
         durationTimer?.invalidate()
         durationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                self?.updateDuration()
-            }
+            // Timer created on the main run loop, callback fires on the main thread.
+            MainActor.assumeIsolated { self?.updateDuration() }
         }
 
         screenRecordingDebugLog("Started duration tracking")

@@ -1806,8 +1806,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(.trailing, trailingInset)
                 .animation(.smooth(duration: 0.16), value: isHoveringClosedMusicWaveformControl)
-                .animation(.smooth(duration: 0.2), value: musicManager.isPlaying)
-        } else {
+        } else if vm.notchState == .open && !vm.hideOnClosed && musicManager.isPlaying {
             LottieAnimationView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -2190,7 +2189,12 @@ struct ContentView: View {
         }
 
         hiddenEdgeMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
-            Task { @MainActor in
+            // NSEvent global monitor callbacks always fire on the main thread.
+            // Use assumeIsolated to avoid allocating a Task on every mouse-move event
+            // (60–120 per second while the monitor is active).
+            // ContentView is a struct — @State properties access reference-backed SwiftUI
+            // storage, so reading self.isHovering etc. on this captured copy is correct.
+            MainActor.assumeIsolated {
                 if self.shouldUseHiddenEdgeHoverPolling {
                     let hovering = self.hiddenHoverActivationContainsMouse()
                     if hovering != self.isHovering {
@@ -2224,6 +2228,7 @@ struct ContentView: View {
 
     private func startHoverClickMonitor() {
         guard Defaults[.openNotchOnHover] else { return }
+        guard isHovering else { return }
         guard !isConnectivityHUDVisible else { return }
         guard !recordingLiveActivityVisibleOnClosedNotch else { return }
         guard hoverClickLocalMonitor == nil else { return }
@@ -2282,11 +2287,15 @@ struct ContentView: View {
 
     private func installStickyTerminalClickMonitor() {
         guard stickyTerminalClickMonitor == nil else { return }
-        stickyTerminalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak vm] _ in
+        stickyTerminalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak vm] _ in
             MainActor.assumeIsolated {
-                guard let vm, vm.notchState == .open else { return }
+                guard let vm, vm.notchState == .open else {
+                    self.removeStickyTerminalClickMonitor()
+                    return
+                }
                 let clickLocation = NSEvent.mouseLocation
                 guard !self.isPointInsideNotchWindow(clickLocation) else { return }
+                self.removeStickyTerminalClickMonitor()
                 vm.close()
             }
         }

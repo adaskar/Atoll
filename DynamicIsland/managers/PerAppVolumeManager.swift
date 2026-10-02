@@ -192,7 +192,8 @@ final class PerAppVolumeManager: ObservableObject {
         guard let interval else { return }
 
         pollTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refreshApps() }
+            // Timer fires on main run loop thread.
+            MainActor.assumeIsolated { self?.refreshApps() }
         }
     }
 
@@ -340,7 +341,8 @@ final class PerAppVolumeManager: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         let processListBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor in self?.refreshApps() }
+            // Dispatched to .main (see AudioObjectAddPropertyListenerBlock call below).
+            MainActor.assumeIsolated { self?.refreshApps() }
         }
         if AudioObjectAddPropertyListenerBlock(systemObject, &processListAddress, .main, processListBlock) == noErr {
             processListListener = processListBlock
@@ -352,7 +354,8 @@ final class PerAppVolumeManager: ObservableObject {
             mElement: kAudioObjectPropertyElementMain
         )
         let defaultDeviceBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor in
+            // Dispatched to .main (see AudioObjectAddPropertyListenerBlock call below).
+            MainActor.assumeIsolated {
                 // Every aggregate is built around a specific output device, so
                 // switching output has to rebuild them all.
                 self?.tearDownAllTaps()
