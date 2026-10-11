@@ -472,7 +472,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             return abs(now.timeIntervalSince(stamp)) <= Self.currentSampleWindow
         }()
 
-        if wasPlaying != isPlayingNow, !hasCurrentSample {
+        if wasPlaying != isPlayingNow, !hasCurrentSample, !newPlaybackState.title.isEmpty {
             // The transition is being observed now, so now is when it happened.
             // The payload's own timestamp is only better than that if it is
             // about now as well -- and the stale one is what caused this.
@@ -551,7 +551,14 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             }
         } else if !self.playbackState.title.isEmpty {
             let elapsedSinceCommand = now.timeIntervalSince(lastCommandTransitionAt)
-            if elapsedSinceCommand < Self.commandTransitionGracePeriod {
+            // Bypass the grace period when the adapter signals a genuine source
+            // closure: playing=false with no bundleIdentifier means no source is
+            // active at all (tab closed, app quit). The grace period is only for
+            // normal track transitions where a brief empty-title flicker happens
+            // between songs from the same player. Applying immediately here stops
+            // the timeline from continuing to tick after the source is gone.
+            let isGenuineClear = !isPlayingNow && newPlaybackState.bundleIdentifier.isEmpty
+            if !isGenuineClear && elapsedSinceCommand < Self.commandTransitionGracePeriod {
                 let remaining = Self.commandTransitionGracePeriod - elapsedSinceCommand
                 deferredEmptyUpdateTask?.cancel()
                 deferredEmptyUpdateTask = Task { [weak self] in
@@ -563,6 +570,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
                 }
                 return
             }
+            deferredEmptyUpdateTask?.cancel()
+            deferredEmptyUpdateTask = nil
             if self.playbackState != newPlaybackState {
                 self.playbackState = newPlaybackState
             }

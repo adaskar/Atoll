@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Vorssaint
 
 import AppKit
+import CoreAudio
 import Foundation
 import ObjectiveC
 
@@ -36,8 +37,117 @@ enum NotchNativePlayback {
     /// System uptime at which the chosen source, still without a track, is
     /// released. A monotonic clock, so changing the time cannot stretch it.
     private static var releaseAt: TimeInterval?
+    /// Tracks when a browser/web-helper candidate claiming `isPlaying` first
+    /// stopped outputting audio, so closed tabs are cleared after a short drain
+    /// grace period without false-dropping during brief buffer underruns.
+    private static var silentSince: [Int32: TimeInterval] = [:]
+    private static var nextSilenceCheck: TimeInterval?
+    private static var commandGraceUntil: TimeInterval = 0
+    private static var audioActivePIDs: Set<Int32> = []
+    private static var deadBrowserIdentity: [Int32: Identity] = [:]
     /// Set before the watch starts; the one-shot reader does not use selection.
     static var includeOtherPlayers = false
+
+    static func noteCommandSent(grace: TimeInterval = 2.5) {
+        lock.lock(); defer { lock.unlock() }
+        commandGraceUntil = ProcessInfo.processInfo.systemUptime + grace
+        silentSince.removeAll()
+        deadBrowserIdentity.removeAll()
+    }
+
+    static var pendingSilenceCheck: TimeInterval? {
+        lock.lock(); defer { lock.unlock() }
+        guard let nextSilenceCheck, nextSilenceCheck > ProcessInfo.processInfo.systemUptime else { return nil }
+        return nextSilenceCheck
+    }
+
+    /// Returns the CoreAudio process object IDs associated with `pid` (and, for
+    /// Safari/WebKit, any `com.apple.WebKit.*` or `com.apple.Safari` process).
+    static func audioObjectIDs(for pid: Int32, bundleIdentifier: String?) -> [AudioObjectID] {
+        var listAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var dataSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &listAddress,
+            0,
+            nil,
+            &dataSize
+        ) == noErr, dataSize > 0 else {
+            return []
+        }
+        let count = Int(dataSize) / MemoryLayout<AudioObjectID>.size
+        var objects = [AudioObjectID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &listAddress,
+            0,
+            nil,
+            &dataSize,
+            &objects
+        ) == noErr else {
+            return []
+        }
+
+        let isSafariFamily = (bundleIdentifier?.hasPrefix("com.apple.WebKit") == true)
+            || (bundleIdentifier == "com.apple.Safari")
+
+        var pidAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyPID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        var matched: [AudioObjectID] = []
+        for obj in objects {
+            var procPID: pid_t = 0
+            var pidSize = UInt32(MemoryLayout<pid_t>.size)
+            guard AudioObjectGetPropertyData(obj, &pidAddress, 0, nil, &pidSize, &procPID) == noErr else {
+                continue
+            }
+            let matchesTarget: Bool
+            if procPID == pid {
+                matchesTarget = true
+            } else if isSafariFamily,
+                      let app = NSRunningApplication(processIdentifier: procPID),
+                      let bid = resolvedBundleIdentifier(for: app),
+                      bid.hasPrefix("com.apple.WebKit") || bid == "com.apple.Safari" {
+                matchesTarget = true
+            } else {
+                matchesTarget = false
+            }
+            if matchesTarget {
+                matched.append(obj)
+            }
+        }
+        return matched
+    }
+
+    /// Checks via CoreAudio HAL whether the given PID (or any WebKit/Safari helper
+    /// when inspecting Safari) is actively outputting audio.
+    private static func isAudioOutputRunning(for pid: Int32, bundleIdentifier: String?) -> Bool {
+        let objects = audioObjectIDs(for: pid, bundleIdentifier: bundleIdentifier)
+        guard !objects.isEmpty else { return false }
+
+        var outAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioProcessPropertyIsRunningOutput,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        for obj in objects {
+            var isRunning: UInt32 = 0
+            var runSize = UInt32(MemoryLayout<UInt32>.size)
+            if AudioObjectGetPropertyData(obj, &outAddress, 0, nil, &runSize, &isRunning) == noErr,
+               isRunning != 0 {
+                return true
+            }
+        }
+        return false
+    }
 
     static var sourceReply: [String: Any] {
         lock.lock(); defer { lock.unlock() }
@@ -62,7 +172,7 @@ enum NotchNativePlayback {
         releaseAt = nil
     }
 
-    private struct Identity: Equatable {
+    private struct Identity: Equatable, Hashable {
         let item: String?
         let metadata: [String]
 
@@ -166,6 +276,7 @@ enum NotchNativePlayback {
         // A rate the player has not updated would rank a paused song as
         // playing. Its own state wins where it answers in time.
         var states: [Int32: Bool] = [:]
+        var candidateInfos: [Int32: [String: Any]] = [:]
         let stateReads = DispatchGroup()
         for app in applications {
             guard var candidate = makeTarget(app) else { continue }
@@ -178,6 +289,13 @@ enum NotchNativePlayback {
                !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari").isEmpty {
                 candidate.applicationBundleIdentifier = "com.apple.Safari"
             }
+            // If the parent application (e.g. Safari) has quit while a shared helper
+            // (e.g. com.apple.WebKit.GPU) is still alive, skip this candidate.
+            if let parentID = candidate.applicationBundleIdentifier,
+               parentID != candidate.bundleIdentifier,
+               NSRunningApplication.runningApplications(withBundleIdentifier: parentID).allSatisfy({ $0.isTerminated }) {
+                continue
+            }
             stateReads.enter()
             readPlaybackState(candidate, queue: callbacks) { isPlaying in
                 resultsLock.lock()
@@ -187,12 +305,27 @@ enum NotchNativePlayback {
             }
             group.enter()
             readInfo(candidate, artwork: false, queue: callbacks) { info in
+                let dict = (info as? [String: Any]) ?? [:]
+                let isMusic = isMusicApp(app, parentBundleIdentifier: candidate.applicationBundleIdentifier)
+                let title = (dict["kMRMediaRemoteNowPlayingInfoTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let duration = (dict["kMRMediaRemoteNowPlayingInfoDuration"] as? NSNumber)?.doubleValue ?? 0
+                let elapsed = (dict["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? NSNumber)?.doubleValue ?? 0
+                let rate = (dict["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue ?? 0
+                let sampleDate = dict["kMRMediaRemoteNowPlayingInfoTimestamp"] as? Date
+                let age = sampleDate.map { max(0, Date().timeIntervalSince($0)) } ?? 0
+                let estimatedElapsed = elapsed + age * max(0, rate)
+                // Browsers/WebKit often leave dormant media widgets (duration > 0, elapsed == 0, rate == 0)
+                // or finished/closed tabs whose extrapolated elapsed time has blown past duration.
+                let hasLiveTimeline = isMusic
+                    || (duration > 0 && elapsed > 0 && estimatedElapsed <= duration + 1.5)
+                    || (duration <= 0 && elapsed > 0)
                 let source = NotchPlaybackSource(pid: candidate.pid, bundleIdentifier: candidate.bundleIdentifier,
-                    isMusicApp: isMusicApp(app, parentBundleIdentifier: candidate.applicationBundleIdentifier),
-                    isPlaying: ((info?["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue ?? 0) > 0,
-                    hasTrack: (info?["kMRMediaRemoteNowPlayingInfoTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                    isMusicApp: isMusic,
+                    isPlaying: rate > 0,
+                    hasTrack: !title.isEmpty && hasLiveTimeline,
                     displayName: presentation[candidate.pid]?.name ?? app.localizedName)
                 resultsLock.lock()
+                candidateInfos[candidate.pid] = dict
                 candidates.append((candidate, source))
                 resultsLock.unlock()
                 group.leave()
@@ -201,15 +334,106 @@ enum NotchNativePlayback {
         // Keep completed reads when an unrelated client misses the deadline.
         _ = group.wait(timeout: .now() + 1)
         _ = stateReads.wait(timeout: .now() + 0.2)
+        let now = ProcessInfo.processInfo.systemUptime
+        let activePIDs = Set(applications.map(\.processIdentifier))
         let ready: [(Target, NotchPlaybackSource)] = resultsLock.withLock {
-            candidates.map { candidate, source in
-                guard let isPlaying = states[candidate.pid], isPlaying != source.isPlaying else { return (candidate, source) }
+            lock.lock()
+            defer { lock.unlock() }
+            silentSince = silentSince.filter { activePIDs.contains($0.key) }
+            audioActivePIDs = audioActivePIDs.intersection(activePIDs)
+            deadBrowserIdentity = deadBrowserIdentity.filter { activePIDs.contains($0.key) }
+            nextSilenceCheck = nil
+            return candidates.map { candidate, source in
+                let mrPlaying = states[candidate.pid] ?? source.isPlaying
+                let currentIdentity = candidateInfos[candidate.pid].flatMap(Identity.init)
+
+                var resolvedPlaying = mrPlaying
+                var resolvedHasTrack = source.hasTrack
+
+                if !source.isMusicApp && resolvedHasTrack {
+                    let audioRunning = isAudioOutputRunning(
+                        for: candidate.pid,
+                        bundleIdentifier: candidate.applicationBundleIdentifier ?? candidate.bundleIdentifier
+                    )
+
+                    if mrPlaying {
+                        if audioRunning || now < commandGraceUntil {
+                            silentSince.removeValue(forKey: candidate.pid)
+                            if audioRunning {
+                                audioActivePIDs.insert(candidate.pid)
+                                deadBrowserIdentity.removeValue(forKey: candidate.pid)
+                            } else {
+                                let checkDeadline = commandGraceUntil + 0.05
+                                nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                            }
+                            resolvedPlaying = true
+                        } else {
+                            let wasAudioActive = audioActivePIDs.contains(candidate.pid)
+                            let firstSilent = silentSince[candidate.pid] ?? {
+                                silentSince[candidate.pid] = now
+                                return now
+                            }()
+                            let silentDuration = now - firstSilent
+                            if !wasAudioActive || silentDuration >= 0.25 {
+                                // Browser/WebKit helper still claims playing in MediaRemote,
+                                // but CoreAudio confirms zero audio output (either never
+                                // active in this session or drained for >= 0.25s).
+                                resolvedPlaying = false
+                                resolvedHasTrack = false
+                                audioActivePIDs.remove(candidate.pid)
+                                silentSince.removeValue(forKey: candidate.pid)
+                                if let currentIdentity {
+                                    deadBrowserIdentity[candidate.pid] = currentIdentity
+                                }
+                            } else {
+                                resolvedPlaying = true
+                                let checkDeadline = firstSilent + 0.25
+                                nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                            }
+                        }
+                    } else {
+                        if audioRunning {
+                            audioActivePIDs.insert(candidate.pid)
+                            deadBrowserIdentity.removeValue(forKey: candidate.pid)
+                            // MediaRemote briefly reports paused before updating state, or is lagging.
+                            let firstMismatch = silentSince[candidate.pid] ?? {
+                                silentSince[candidate.pid] = now
+                                return now
+                            }()
+                            if now - firstMismatch < 0.25 {
+                                resolvedPlaying = true
+                                let checkDeadline = firstMismatch + 0.25
+                                nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                            } else {
+                                resolvedPlaying = false
+                            }
+                        } else {
+                            silentSince.removeValue(forKey: candidate.pid)
+                            resolvedPlaying = false
+                            let wasPreviouslySelected = (candidate.pid == selected?.pid)
+                            if let deadID = deadBrowserIdentity[candidate.pid], deadID == currentIdentity {
+                                resolvedHasTrack = false
+                            } else if !audioActivePIDs.contains(candidate.pid) && !wasPreviouslySelected && now >= commandGraceUntil {
+                                // Ignore stale paused browser sessions that never actively played audio.
+                                resolvedHasTrack = false
+                            }
+                        }
+                    }
+                } else {
+                    silentSince.removeValue(forKey: candidate.pid)
+                    if !resolvedHasTrack {
+                        audioActivePIDs.remove(candidate.pid)
+                    }
+                }
+
+                guard resolvedPlaying != source.isPlaying || resolvedHasTrack != source.hasTrack else {
+                    return (candidate, source)
+                }
                 return (candidate, NotchPlaybackSource(pid: source.pid, bundleIdentifier: source.bundleIdentifier,
-                                                       isMusicApp: source.isMusicApp, isPlaying: isPlaying,
-                                                       hasTrack: source.hasTrack, displayName: source.displayName))
+                                                       isMusicApp: source.isMusicApp, isPlaying: resolvedPlaying,
+                                                       hasTrack: resolvedHasTrack, displayName: source.displayName))
             }
         }
-        let now = ProcessInfo.processInfo.systemUptime
         lock.lock()
         if let selection {
             let app = NSRunningApplication(processIdentifier: selection.pid)

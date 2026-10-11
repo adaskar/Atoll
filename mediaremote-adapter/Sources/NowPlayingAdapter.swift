@@ -10,6 +10,7 @@
 // with DynaLoader and calls adapter entry points.
 
 import AppKit
+import CoreAudio
 import Foundation
 
 private typealias InfoCallback = @convention(block) (NSDictionary?) -> Void
@@ -32,6 +33,58 @@ private var lastPosition: (revision: UUID, sample: Double, timestamp: Date?, ela
 private var lastEmittedPausedData: Data?
 /// Set by the watch process: schedules another read at a system uptime.
 private var readAt: ((TimeInterval) -> Void)?
+
+// Targeted CoreAudio process listener (follows vorssaint-utils NotchAudioLevelService
+// C-callback pattern so listeners can be cleanly added/removed per selected player,
+// with zero listeners registered when idle).
+private let targetWatchLock = NSLock()
+private var watchedAudioObjects: Set<AudioObjectID> = []
+private var onTargetStateChanged: (() -> Void)?
+
+private var runningOutputPropertyAddress = AudioObjectPropertyAddress(
+    mSelector: kAudioProcessPropertyIsRunningOutput,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+)
+private var runningPropertyAddress = AudioObjectPropertyAddress(
+    mSelector: kAudioProcessPropertyIsRunning,
+    mScope: kAudioObjectPropertyScopeGlobal,
+    mElement: kAudioObjectPropertyElementMain
+)
+
+private let audioProcessListenerProc: AudioObjectPropertyListenerProc = { _, _, _, _ in
+    DispatchQueue.main.async {
+        onTargetStateChanged?()
+    }
+    return noErr
+}
+
+private func updateTargetWatchers(for selected: NotchNativePlayback.Target?) {
+    targetWatchLock.lock()
+    defer { targetWatchLock.unlock() }
+
+    guard let selected else {
+        for obj in watchedAudioObjects {
+            AudioObjectRemovePropertyListener(obj, &runningOutputPropertyAddress, audioProcessListenerProc, nil)
+            AudioObjectRemovePropertyListener(obj, &runningPropertyAddress, audioProcessListenerProc, nil)
+        }
+        watchedAudioObjects.removeAll()
+        return
+    }
+
+    let bundleID = selected.applicationBundleIdentifier ?? selected.bundleIdentifier
+    let desiredObjects = Set(NotchNativePlayback.audioObjectIDs(for: selected.pid, bundleIdentifier: bundleID))
+
+    for removed in watchedAudioObjects.subtracting(desiredObjects) {
+        AudioObjectRemovePropertyListener(removed, &runningOutputPropertyAddress, audioProcessListenerProc, nil)
+        AudioObjectRemovePropertyListener(removed, &runningPropertyAddress, audioProcessListenerProc, nil)
+    }
+    for added in desiredObjects.subtracting(watchedAudioObjects) {
+        AudioObjectAddPropertyListener(added, &runningOutputPropertyAddress, audioProcessListenerProc, nil)
+        AudioObjectAddPropertyListener(added, &runningPropertyAddress, audioProcessListenerProc, nil)
+    }
+    watchedAudioObjects = desiredObjects
+}
 
 func function<T>(_ handle: UnsafeMutableRawPointer?, _ name: String, as type: T.Type) -> T? {
     guard let handle, let symbol = dlsym(handle, name) else { return nil }
@@ -192,6 +245,8 @@ public func vorssaintNowPlayingGet() {
     // No player may report a change while the chosen source waits for its
     // next track. Read again when that wait ends, so the release shows.
     if watching, let release = NotchNativePlayback.pendingRelease { readAt?(release) }
+    if watching, let silenceCheck = NotchNativePlayback.pendingSilenceCheck { readAt?(silenceCheck) }
+    if watching { updateTargetWatchers(for: selected) }
     if watching, selected == nil {
         NotchNativePlayback.publish(nil)
         previousArtwork = nil
@@ -367,22 +422,33 @@ public func vorssaintNowPlayingWatch() {
     register(.main)
     let reader = DispatchQueue(label: "com.vorssaint.now-playing-watch")
     var pending: DispatchWorkItem?
-    let names = ["kMRMediaRemoteNowPlayingInfoDidChangeNotification",
-                 "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
-                 "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification",
-                 "kMRMediaRemotePlayerNowPlayingInfoDidChangeNotification",
-                 "kMRMediaRemoteNowPlayingPlayerStateDidChange",
-                 "kMRMediaRemoteNowPlayingApplicationClientStateDidChange",
-                 // Play and pause of any player, not only the system's current one.
-                 "kMRMediaRemotePlayerIsPlayingDidChangeNotification"]
-        // Its name differs from the symbol's (a leading underscore on 27.2).
-        + [NotchNativePlayback.stringConstant("kMRMediaRemotePlayerPlaybackStateDidChangeNotification")].compactMap { $0 }
+    let dynamicNames = [
+        "kMRMediaRemotePlayerPlaybackStateDidChangeNotification",
+        "kMRMediaRemoteNowPlayingPlayerDidChange",
+        "kMRMediaRemoteOriginNowPlayingPlayerDidChange",
+        "kMRMediaRemoteNowPlayingApplicationDidUnregister",
+        "kMRMediaRemoteNowPlayingPlayerDidUnregister",
+        "kMRMediaRemoteActivePlayerPathsDidChange",
+        "kMRMediaRemoteSupportedCommandsDidChangeNotification",
+        "kMRMediaRemotePlayerSupportedCommandsDidChangeNotification",
+    ].compactMap { NotchNativePlayback.stringConstant($0) }
+    let names = Array(Set([
+        "kMRMediaRemoteNowPlayingInfoDidChangeNotification",
+        "kMRMediaRemoteNowPlayingApplicationDidChangeNotification",
+        "kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification",
+        "kMRMediaRemotePlayerNowPlayingInfoDidChangeNotification",
+        "kMRMediaRemoteNowPlayingPlayerStateDidChange",
+        "kMRMediaRemoteNowPlayingApplicationClientStateDidChange",
+        // Play and pause of any player, not only the system's current one.
+        "kMRMediaRemotePlayerIsPlayingDidChangeNotification",
+    ] + dynamicNames))
     func refresh() {
         pending?.cancel()
         let work = DispatchWorkItem { vorssaintNowPlayingGet() }
         pending = work
         reader.asyncAfter(deadline: .now() + 0.12, execute: work)
     }
+    onTargetStateChanged = { refresh() }
     readAt = { uptime in
         let delay = max(0, uptime - ProcessInfo.processInfo.systemUptime)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { refresh() }
@@ -411,6 +477,7 @@ public func vorssaintNowPlayingWatch() {
 }
 
 private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
+    NotchNativePlayback.noteCommandSent()
     let command = request.command
     let handle = NotchNativePlayback.handle
     switch command {

@@ -792,15 +792,24 @@ class MusicManager: ObservableObject {
             .store(in: &cancellables)
 
         NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didTerminateApplicationNotification)
+            .receive(on: DispatchQueue.main)
             .sink { [weak self] notification in
                 guard let self = self,
                       let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                      app.bundleIdentifier == Self.pearDesktopBundleID else { return }
+                      let terminatedBundleID = app.bundleIdentifier else { return }
 
-                print("[MusicManager] Pear Desktop terminated, reverting to preferred controller")
-                if self.isPearDesktopAutoSwitched {
-                    self.isPearDesktopAutoSwitched = false
-                    self.setActiveControllerBasedOnPreference()
+                if terminatedBundleID == Self.pearDesktopBundleID {
+                    print("[MusicManager] Pear Desktop terminated, reverting to preferred controller")
+                    if self.isPearDesktopAutoSwitched {
+                        self.isPearDesktopAutoSwitched = false
+                        self.setActiveControllerBasedOnPreference()
+                    }
+                    return
+                }
+
+                if terminatedBundleID == self.bundleIdentifier,
+                   !(self.activeController is NowPlayingController) {
+                    self.updateFromPlaybackState(PlaybackState(bundleIdentifier: ""))
                 }
             }
             .store(in: &cancellables)
@@ -971,14 +980,17 @@ class MusicManager: ObservableObject {
             self.songDuration = state.duration
         }
 
-        if state.bundleIdentifier != self.bundleIdentifier {
-            self.bundleIdentifier = state.bundleIdentifier
+        let resolvedBundleIdentifier = state.bundleIdentifier.isEmpty ? nil : state.bundleIdentifier
+        if resolvedBundleIdentifier != self.bundleIdentifier {
+            self.bundleIdentifier = resolvedBundleIdentifier
         }
 
         // Check for playback state changes (playing/paused)
         let eventIsPlaying = state.isPlaying
-        if !eventIsPlaying && state.title.isEmpty && state.artist.isEmpty {
+        let isClearedSession = !eventIsPlaying && state.title.isEmpty && state.artist.isEmpty
+        if isClearedSession {
             optimisticPlaybackTransition.reset()
+            dismissTransientMusicPreview()
         }
         let expectedState = optimisticPlaybackTransition.expectedState
         let shouldApplyPlaybackEvent = optimisticPlaybackTransition.shouldApply(
@@ -1009,13 +1021,18 @@ class MusicManager: ObservableObject {
         let shouldAutoPeekOnTrackChange = Defaults[.showSneakPeekOnTrackChange]
 
         if hasContentChange {
-            self.triggerFlipAnimation()
+            if !isClearedSession {
+                self.triggerFlipAnimation()
+            }
 
             if artworkChanged, let artwork = state.artwork {
                 self.updateArtwork(artwork)
             } else if state.artwork == nil {
-                // Try to use app icon if no artwork but track changed
-                if let appIconImage = AppIconAsNSImage(for: state.bundleIdentifier) {
+                if isClearedSession {
+                    self.usingAppIconForArtwork = false
+                    self.updateAlbumArt(newAlbumArt: defaultImage)
+                } else if let appIconImage = AppIconAsNSImage(for: state.bundleIdentifier) {
+                    // Try to use app icon if no artwork but track changed
                     self.usingAppIconForArtwork = true
                     self.updateAlbumArt(newAlbumArt: appIconImage)
                 }
@@ -1076,8 +1093,8 @@ class MusicManager: ObservableObject {
             self.isShuffled = state.isShuffled
         }
 
-        if state.bundleIdentifier != self.bundleIdentifier {
-            self.bundleIdentifier = state.bundleIdentifier
+        if resolvedBundleIdentifier != self.bundleIdentifier {
+            self.bundleIdentifier = resolvedBundleIdentifier
         }
 
         if repeatModeChanged && !sourceOwnsPlaybackModes {
