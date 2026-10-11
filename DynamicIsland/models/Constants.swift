@@ -1353,7 +1353,8 @@ extension Defaults.Keys {
     static let showUSBConnectionHUD = Key<Bool>("showUSBConnectionHUD", default: true)
     static let usbDisplayMode = Key<USBDisplayMode>("usbDisplayMode", default: .popover)
     static let showUSBDevicesIcon = Key<Bool>("showUSBDevicesIcon", default: true)
-    static let hideUSBHubsAndInternal = Key<Bool>("hideUSBHubsAndInternal", default: true)
+    static let hideUSBHubsAndInternal = Key<Bool>("hideUSBHubsAndInternal", default: false)
+    static let didMigrateUSBShowHubsByDefault = Key<Bool>("didMigrateUSBShowHubsByDefault", default: false)
     static let playUSBConnectionSound = Key<Bool>("playUSBConnectionSound", default: false)
     static let enableUSBConnectionHaptics = Key<Bool>("enableUSBConnectionHaptics", default: true)
 

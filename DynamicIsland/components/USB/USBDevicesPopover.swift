@@ -32,7 +32,7 @@ struct USBDevicesPopover: View {
     @State private var expandedDeviceIDs: Set<UInt64> = []
     @State private var measuredListHeight: CGFloat = 0
 
-    private let maxListHeight: CGFloat = 420
+    private let maxListHeight: CGFloat = 440
 
     private var estimatedListHeight: CGFloat {
         let devices = manager.displayedDevices
@@ -43,20 +43,22 @@ struct USBDevicesPopover: View {
             if index > 0 {
                 total += 8
             }
-            // Base row height (title + subtitle + padding)
-            var rowHeight: CGFloat = 56
-            if device.powerSummaryText != nil || device.usbVersion != nil {
+            var rowHeight: CGFloat = 58
+            if device.powerSummaryText != nil
+                || device.usbVersion != nil
+                || device.displayResolutionSummary != nil
+                || device.parentRouteSummary != nil
+                || !device.connectedChildren.isEmpty {
                 rowHeight += 26
+            }
+            if !device.connectedChildren.isEmpty {
+                rowHeight += 24
             }
             if !device.mountedVolumes.isEmpty {
                 rowHeight += CGFloat(device.mountedVolumes.count) * 42 + 6
             }
             if expandedDeviceIDs.contains(device.id) {
-                var detailLines = 2 // VID:PID + Location ID
-                if device.speed != nil { detailLines += 1 }
-                if device.serialNumber != nil { detailLines += 1 }
-                if device.busPowerMA != nil { detailLines += 1 }
-                rowHeight += CGFloat(detailLines) * 18 + 20
+                rowHeight += 120
             }
             total += rowHeight
         }
@@ -124,13 +126,13 @@ struct USBDevicesPopover: View {
             }
         }
         .padding(16)
-        .frame(width: 340)
+        .frame(width: 356)
         .background(
             VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
                 .cornerRadius(12)
         )
         .onAppear {
-            manager.refreshMountedVolumes()
+            manager.refreshDevices()
         }
     }
 
@@ -229,6 +231,9 @@ struct USBDeviceRowView: View {
         if device.hasMountedStorage {
             return .orange
         }
+        if device.isDisplayConnection {
+            return .mint
+        }
         if device.speed?.isSuperSpeedOrFaster == true {
             return .cyan
         }
@@ -236,6 +241,20 @@ struct USBDeviceRowView: View {
             return .purple
         }
         return .blue
+    }
+
+    private var subtitleComponents: [String] {
+        var parts: [String] = []
+        if let vendor = device.resolvedVendorName {
+            parts.append(vendor)
+        }
+        if let portName = device.portName {
+            parts.append(portName)
+        }
+        if let parentHub = device.parentHubName {
+            parts.append("via \(parentHub)")
+        }
+        return parts
     }
 
     var body: some View {
@@ -259,45 +278,36 @@ struct USBDeviceRowView: View {
                             .lineLimit(1)
 
                         if device.isHub {
-                            Text("Hub")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.primary.opacity(0.08), in: Capsule())
+                            roleBadge("Hub", tint: .purple)
+                        }
+                        if device.isDisplayConnection, let proto = device.displayShortProtocol {
+                            roleBadge(proto, tint: .mint)
+                        } else if device.hasHDMIOutput {
+                            roleBadge("HDMI", tint: .mint)
+                        } else if device.hasDisplayPortOutput {
+                            roleBadge("DP", tint: .mint)
                         }
                     }
 
-                    HStack(spacing: 4) {
-                        if let vendor = device.resolvedVendorName {
-                            Text(vendor)
-                                .lineLimit(1)
-                        }
-                        if let vendor = device.resolvedVendorName, device.portName != nil {
-                            Text("•")
-                                .accessibilityHidden(true)
-                            let _ = vendor
-                        }
-                        if let portName = device.portName {
-                            Text(portName)
-                                .lineLimit(1)
-                        }
+                    if !subtitleComponents.isEmpty {
+                        Text(subtitleComponents.joined(separator: " • "))
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
                     }
-                    .font(.system(size: 10.5))
-                    .foregroundStyle(.secondary)
                 }
 
                 Spacer(minLength: 4)
 
                 HStack(spacing: 6) {
-                    if let speed = device.speed {
-                        Text(speed.shortLabel)
+                    if let badge = device.primarySpeedBadge {
+                        Text(badge)
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .foregroundStyle(speed.isSuperSpeedOrFaster ? Color.cyan : .secondary)
+                            .foregroundStyle(device.isHighBandwidthBadge ? Color.cyan : .secondary)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(
-                                (speed.isSuperSpeedOrFaster ? Color.cyan : Color.primary).opacity(0.12),
+                                (device.isHighBandwidthBadge ? Color.cyan : Color.primary).opacity(0.12),
                                 in: Capsule()
                             )
                     }
@@ -331,15 +341,55 @@ struct USBDeviceRowView: View {
                     .help(isExpanded ? "Hide details" : "Show technical details")
                 }
             }
+            .contentShape(Rectangle())
+            .onTapGesture(perform: onToggleExpand)
 
-            // Power & USB version badges
-            if device.powerSummaryText != nil || device.usbVersion != nil {
-                HStack(spacing: 6) {
-                    if let usbVersion = device.usbVersion {
-                        metadataPill(icon: "bolt.horizontal", text: "USB \(usbVersion)")
+            // Primary metadata pills (Display resolution, USB standard, Power, Companion hub)
+            if device.displayResolutionSummary != nil
+                || device.usbVersion != nil
+                || device.powerSummaryText != nil
+                || device.companionHubSummary != nil {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        if let res = device.displayResolutionSummary {
+                            metadataPill(icon: "sparkles.tv", text: res)
+                        }
+                        if let link = device.displayLinkDescription {
+                            metadataPill(icon: "cable.connector.horizontal", text: link)
+                        }
+                        if let usbVersion = device.usbVersion {
+                            metadataPill(icon: "bolt.horizontal", text: "USB \(usbVersion)")
+                        }
+                        if device.companionHubSummary != nil {
+                            metadataPill(icon: "arrow.triangle.branch", text: "+ USB 2.0 Companion")
+                        }
+                        if let power = device.powerSummaryText {
+                            metadataPill(icon: "bolt.fill", text: power)
+                        }
                     }
-                    if let power = device.powerSummaryText {
-                        metadataPill(icon: "bolt.fill", text: power)
+                }
+            }
+
+            // Connected downstream devices on a Hub (including HDMI monitor & USB peripherals)
+            if !device.connectedChildren.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 5) {
+                        ForEach(device.connectedChildren, id: \.self) { childName in
+                            HStack(spacing: 3) {
+                                Image(systemName: childName.contains("HDMI") || childName.contains("Display") ? "display" : "arrow.turn.down.right")
+                                    .font(.system(size: 8.5, weight: .semibold))
+                                Text(childName)
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(childName.contains("HDMI") || childName.contains("Display") ? Color.mint : .secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(
+                                (childName.contains("HDMI") || childName.contains("Display") ? Color.mint : Color.primary).opacity(0.09),
+                                in: Capsule()
+                            )
+                        }
                     }
                 }
             }
@@ -390,22 +440,89 @@ struct USBDeviceRowView: View {
                 }
             }
 
-            // Expandable technical details (WhatCable-style inspection)
+            // Expandable technical details (WhatCable-style deep inspection)
             if isExpanded {
                 VStack(alignment: .leading, spacing: 4) {
                     Divider()
                         .padding(.vertical, 2)
-                    detailLine(label: "VID : PID", value: device.vendorProductHex)
-                    if let speed = device.speed {
-                        detailLine(label: "Link Speed", value: "\(speed.generationLabel) (\(speed.shortLabel))")
-                    }
-                    if let serial = device.serialNumber {
-                        detailLine(label: "Serial", value: serial)
-                    }
-                    detailLine(label: "Location ID", value: String(format: "0x%08X", device.locationID))
-                    if let busPower = device.busPowerMA {
-                        let req = device.currentMA ?? 0
-                        detailLine(label: "Power Budget", value: "\(req) mA requested / \(busPower) mA available")
+
+                    if device.isDisplayConnection {
+                        if let connType = device.displayConnectionType {
+                            detailLine(label: "Connection", value: connType)
+                        }
+                        if let res = device.displayResolutionSummary {
+                            detailLine(label: "Active Mode", value: res)
+                        }
+                        if let maxMode = device.displayMaxModeSummary {
+                            detailLine(label: "Native Top Mode", value: maxMode)
+                        }
+                        if let link = device.displayLinkDescription {
+                            detailLine(label: "DisplayPort Link", value: link)
+                        }
+                        if let port = device.portName {
+                            detailLine(label: "Physical Port", value: port)
+                        }
+                        if let route = device.parentRouteSummary {
+                            detailLine(label: "Hub Route", value: route)
+                        }
+                        if let pd = device.usbPDControllerSummary {
+                            detailLine(label: "Adapter PD", value: pd)
+                        }
+                        if device.productID != 0 {
+                            detailLine(label: "EDID Product", value: device.vendorProductHex)
+                        }
+                        if let mfgDate = device.displayManufactureDate {
+                            detailLine(label: "Manufactured", value: mfgDate)
+                        }
+                        if let serial = device.serialNumber {
+                            detailLine(label: "Serial", value: serial)
+                        }
+                    } else {
+                        detailLine(label: "VID : PID", value: device.vendorProductHex)
+                        if let speed = device.speed {
+                            detailLine(label: "Link Speed", value: "\(speed.generationLabel) (\(speed.shortLabel))")
+                        }
+                        if let companion = device.companionHubSummary {
+                            detailLine(label: "Companion Hub", value: companion)
+                        }
+                        if let video = device.videoOutputSummary {
+                            detailLine(label: "Video Alt Mode", value: video)
+                        }
+                        if let port = device.portName {
+                            if let transports = device.portTransportsSummary {
+                                detailLine(label: "Physical Port", value: "\(port) (\(transports))")
+                            } else {
+                                detailLine(label: "Physical Port", value: port)
+                            }
+                        }
+                        if let pd = device.usbPDControllerSummary, device.isHub {
+                            detailLine(label: "USB-PD Chip", value: pd)
+                        }
+                        if let route = device.parentRouteSummary {
+                            detailLine(label: "Parent Hub", value: route)
+                        }
+                        if !device.connectedChildren.isEmpty {
+                            detailLine(label: "Downstream", value: device.connectedChildren.joined(separator: ", "))
+                        }
+                        if let fw = device.firmwareVersion {
+                            detailLine(label: "Firmware", value: "v\(fw)")
+                        }
+                        if let serial = device.serialNumber {
+                            detailLine(label: "Serial", value: serial)
+                        }
+                        detailLine(label: "Location ID", value: String(format: "0x%08X", device.locationID))
+                        if let busPower = device.busPowerMA {
+                            let req = device.currentMA ?? 0
+                            detailLine(label: "Power Budget", value: "\(req) mA requested / \(busPower) mA available")
+                        }
+                        if let proc = device.activeProcessName {
+                            detailLine(label: "Active App", value: proc)
+                        } else if let driver = device.driverName {
+                            detailLine(label: "Driver", value: driver)
+                        }
+                        if let bb = device.billboardSummary {
+                            detailLine(label: "Billboard", value: bb)
+                        }
                     }
                 }
                 .font(.system(size: 10, design: .monospaced))
@@ -423,12 +540,22 @@ struct USBDeviceRowView: View {
         )
     }
 
+    private func roleBadge(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(tint.opacity(0.14), in: Capsule())
+    }
+
     private func metadataPill(icon: String, text: String) -> some View {
         HStack(spacing: 3) {
             Image(systemName: icon)
                 .font(.system(size: 8.5, weight: .semibold))
             Text(text)
                 .font(.system(size: 9.5, weight: .medium))
+                .lineLimit(1)
         }
         .foregroundStyle(.secondary)
         .padding(.horizontal, 6)
@@ -437,14 +564,14 @@ struct USBDeviceRowView: View {
     }
 
     private func detailLine(label: String, value: String) -> some View {
-        HStack {
+        HStack(alignment: .top, spacing: 8) {
             Text(label)
                 .foregroundStyle(.secondary)
-            Spacer()
+            Spacer(minLength: 4)
             Text(value)
                 .foregroundStyle(isDarkCardStyle ? .white.opacity(0.9) : .primary)
-                .lineLimit(1)
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
         }
     }
 }
-

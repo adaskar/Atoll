@@ -110,7 +110,7 @@ struct NotchUSBDevicesView: View {
             updateSuppression(for: false)
         }
         .onAppear {
-            manager.refreshMountedVolumes()
+            manager.refreshDevices()
         }
     }
 
@@ -189,33 +189,64 @@ struct USBNotchGridCard: View {
     let onEject: () -> Void
     let onOpenVolume: (USBMountedVolume) -> Void
 
+    private var subtitleText: String {
+        var parts: [String] = []
+        if let vendor = device.resolvedVendorName {
+            parts.append(vendor)
+        } else if let usbVersion = device.usbVersion {
+            parts.append("USB \(usbVersion)")
+        }
+        if let port = device.portName {
+            parts.append(port)
+        }
+        if let res = device.displayResolutionSummary {
+            parts.append(res)
+        } else if let parentHub = device.parentHubName {
+            parts.append("via \(parentHub)")
+        }
+        return parts.isEmpty ? "USB Device" : parts.joined(separator: " • ")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: device.sfSymbol)
                     .font(.system(size: 16))
-                    .foregroundColor(.blue)
+                    .foregroundColor(device.isDisplayConnection ? .mint : .blue)
                     .frame(width: 28, height: 28)
                     .background(Color.white.opacity(0.06))
                     .clipShape(RoundedRectangle(cornerRadius: 6))
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(device.productName)
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .multilineTextAlignment(.leading)
+                    HStack(spacing: 5) {
+                        Text(device.productName)
+                            .font(.system(size: 13))
+                            .foregroundStyle(.white)
+                            .lineLimit(1)
+                            .multilineTextAlignment(.leading)
+
+                        if device.isHub {
+                            compactTag("Hub", tint: .purple)
+                        }
+                        if device.isDisplayConnection, let proto = device.displayShortProtocol {
+                            compactTag(proto, tint: .mint)
+                        } else if device.hasHDMIOutput {
+                            compactTag("HDMI", tint: .mint)
+                        } else if device.hasDisplayPortOutput {
+                            compactTag("DP", tint: .mint)
+                        }
+                    }
 
                     HStack(spacing: 6) {
-                        Text(device.resolvedVendorName ?? device.usbVersion.map { "USB \($0)" } ?? "USB Device")
+                        Text(subtitleText)
                             .font(.system(size: 10))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                         Spacer(minLength: 0)
-                        if let speed = device.speed {
-                            Text(speed.shortLabel)
-                                .font(.system(size: 10))
-                                .foregroundStyle(.secondary)
+                        if let badge = device.primarySpeedBadge {
+                            Text(badge)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundStyle(device.isHighBandwidthBadge ? Color.cyan : .secondary)
                         }
                     }
                 }
@@ -243,6 +274,27 @@ struct USBNotchGridCard: View {
             }
             .contentShape(Rectangle())
             .onTapGesture(perform: onToggleExpand)
+
+            if !device.connectedChildren.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 4) {
+                        ForEach(device.connectedChildren, id: \.self) { childName in
+                            HStack(spacing: 3) {
+                                Image(systemName: childName.contains("HDMI") || childName.contains("Display") ? "display" : "arrow.turn.down.right")
+                                    .font(.system(size: 8, weight: .semibold))
+                                Text(childName)
+                                    .font(.system(size: 9.5, weight: .medium))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(childName.contains("HDMI") || childName.contains("Display") ? Color.mint : .white.opacity(0.8))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.white.opacity(0.07))
+                            .clipShape(Capsule())
+                        }
+                    }
+                }
+            }
 
             if !device.mountedVolumes.isEmpty {
                 HStack(spacing: 6) {
@@ -281,45 +333,63 @@ struct USBNotchGridCard: View {
                     .overlay(Color.white.opacity(0.08))
 
                 Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 3) {
-                    if let usbVersion = device.usbVersion {
-                        GridRow {
-                            Text("Standard")
-                                .foregroundStyle(.secondary)
-                            Text("USB \(usbVersion)")
-                                .foregroundStyle(.white.opacity(0.9))
+                    if device.isDisplayConnection {
+                        if let connType = device.displayConnectionType {
+                            gridRow(label: "Connection", value: connType)
                         }
-                    }
-                    if let speed = device.speed {
-                        GridRow {
-                            Text("Link Speed")
-                                .foregroundStyle(.secondary)
-                            Text("\(speed.generationLabel) (\(speed.shortLabel))")
-                                .foregroundStyle(.white.opacity(0.9))
+                        if let res = device.displayResolutionSummary {
+                            gridRow(label: "Active Mode", value: res)
                         }
-                    }
-                    if let power = device.powerSummaryText {
-                        GridRow {
-                            Text("Power")
-                                .foregroundStyle(.secondary)
-                            Text(power)
-                                .foregroundStyle(.white.opacity(0.9))
+                        if let link = device.displayLinkDescription {
+                            gridRow(label: "DP Link", value: link)
                         }
-                    }
-                    GridRow {
-                        Text("VID : PID")
-                            .foregroundStyle(.secondary)
-                        Text(device.vendorProductHex)
-                            .font(.system(size: 10, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.9))
-                    }
-                    if let serial = device.serialNumber {
-                        GridRow {
-                            Text("Serial")
-                                .foregroundStyle(.secondary)
-                            Text(serial)
-                                .font(.system(size: 10, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.9))
-                                .lineLimit(1)
+                        if let port = device.portName {
+                            gridRow(label: "Port", value: port)
+                        }
+                        if let route = device.parentRouteSummary {
+                            gridRow(label: "Hub Route", value: route)
+                        }
+                        if let pd = device.usbPDControllerSummary {
+                            gridRow(label: "Adapter PD", value: pd)
+                        }
+                        if let serial = device.serialNumber {
+                            gridRow(label: "Serial", value: serial, monospaced: true)
+                        }
+                    } else {
+                        if let usbVersion = device.usbVersion {
+                            gridRow(label: "Standard", value: "USB \(usbVersion)")
+                        }
+                        if let speed = device.speed {
+                            gridRow(label: "Link Speed", value: "\(speed.generationLabel) (\(speed.shortLabel))")
+                        }
+                        if let companion = device.companionHubSummary {
+                            gridRow(label: "Companion", value: companion)
+                        }
+                        if let video = device.videoOutputSummary {
+                            gridRow(label: "Video Out", value: video)
+                        }
+                        if let port = device.portName {
+                            if let transports = device.portTransportsSummary {
+                                gridRow(label: "Port", value: "\(port) (\(transports))")
+                            } else {
+                                gridRow(label: "Port", value: port)
+                            }
+                        }
+                        if let pd = device.usbPDControllerSummary, device.isHub {
+                            gridRow(label: "USB-PD Chip", value: pd)
+                        }
+                        if let route = device.parentRouteSummary {
+                            gridRow(label: "Parent Hub", value: route)
+                        }
+                        if let power = device.powerSummaryText {
+                            gridRow(label: "Power", value: power)
+                        }
+                        gridRow(label: "VID : PID", value: device.vendorProductHex, monospaced: true)
+                        if let fw = device.firmwareVersion {
+                            gridRow(label: "Firmware", value: "v\(fw)", monospaced: true)
+                        }
+                        if let serial = device.serialNumber {
+                            gridRow(label: "Serial", value: serial, monospaced: true)
                         }
                     }
                 }
@@ -340,6 +410,24 @@ struct USBNotchGridCard: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
         .animation(.easeInOut(duration: 0.12), value: isHovered)
     }
+
+    private func compactTag(_ text: String, tint: Color) -> some View {
+        Text(text)
+            .font(.system(size: 8.5, weight: .semibold))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 1)
+            .background(tint.opacity(0.16), in: Capsule())
+    }
+
+    private func gridRow(label: String, value: String, monospaced: Bool = false) -> some View {
+        GridRow {
+            Text(label)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(monospaced ? .system(size: 10, design: .monospaced) : .system(size: 10))
+                .foregroundStyle(.white.opacity(0.9))
+                .lineLimit(1)
+        }
+    }
 }
-
-
