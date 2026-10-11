@@ -96,9 +96,9 @@ func emit(_ reply: [String: Any]) {
     let rawArtist = reply["kMRMediaRemoteNowPlayingInfoArtist"] as? String ?? reply["artist"] as? String ?? ""
     let rawAlbum = reply["kMRMediaRemoteNowPlayingInfoAlbum"] as? String ?? reply["album"] as? String ?? ""
 
-    payload["title"] = isPlaying ? rawTitle : (reply["title"] as? String ?? "")
-    payload["artist"] = isPlaying ? rawArtist : (reply["artist"] as? String ?? "")
-    payload["album"] = isPlaying ? rawAlbum : (reply["album"] as? String ?? "")
+    payload["title"] = rawTitle
+    payload["artist"] = rawArtist
+    payload["album"] = rawAlbum
 
     finalReply["title"] = payload["title"]
     finalReply["artist"] = payload["artist"]
@@ -127,6 +127,9 @@ func emit(_ reply: [String: Any]) {
 
     if let artwork = reply["artworkBase64"] as? String {
         payload["artworkData"] = artwork
+    }
+    if reply["artworkUnchanged"] as? Bool == true {
+        payload["artworkUnchanged"] = true
     }
 
     finalReply["diff"] = false
@@ -366,8 +369,11 @@ public func vorssaintNowPlayingWatch() {
         if data.isEmpty { exit(0) }
         DispatchQueue.main.async {
             for command in commandFramer.append(data) {
-                guard let command else { emit(["sent": false]); continue }
-                reader.async { sendPlaybackCommand(command) }
+                guard let command else { continue }
+                reader.async {
+                    sendPlaybackCommand(command)
+                    refresh()
+                }
             }
         }
     }
@@ -383,9 +389,7 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
         NotchNativePlayback.choose(selection)
         vorssaintNowPlayingGet()
         return
-    case .validate(let id, let context):
-        emit(["validationRequest": id.uuidString,
-              "validationOK": NotchNativePlayback.validatedTarget(for: context) != nil])
+    case .validate(_, _):
         return
     case .queue(let request): NotchNativeQueue.configure(request); return
     case .queueStop: NotchNativeQueue.configure(nil); return
@@ -393,22 +397,41 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     default: break
     }
     let target = request.context.flatMap { NotchNativePlayback.validatedTarget(for: $0) } ?? NotchNativePlayback.target
-    guard let target else { emit(["sent": false]); return }
     let identifier: Int32
     var options: CFDictionary?
+    var seekPosition: Double?
     switch command {
-    case .toggle: identifier = target.playPauseCommand
+    case .toggle: identifier = target?.playPauseCommand ?? 2
+    case .play: identifier = 0
+    case .pause: identifier = 1
     case .next: identifier = 4
     case .previous: identifier = 5
     case .seek(let position):
-        guard let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") else {
-            emit(["sent": false]); return
-        }
+        seekPosition = position
         identifier = 24
-        options = [key: position] as CFDictionary
+        if let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") {
+            options = [key: position] as CFDictionary
+        }
     case .queue, .queueStop, .queuePlay, .validate, .source: return
     }
-    emit(["sent": NotchNativePlayback.send(identifier, options: options, to: target)])
+    var didSend = false
+    if let target {
+        didSend = NotchNativePlayback.send(identifier, options: options, to: target)
+    }
+    if !didSend {
+        let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+        if let position = seekPosition {
+            typealias SetElapsed = @convention(c) (Double) -> Void
+            if let setElapsed = function(handle, "MRMediaRemoteSetElapsedTime", as: SetElapsed.self) {
+                setElapsed(position)
+            }
+        } else {
+            typealias SendCmd = @convention(c) (Int32, AnyObject?) -> Bool
+            if let send = function(handle, "MRMediaRemoteSendCommand", as: SendCmd.self) {
+                _ = send(identifier, options)
+            }
+        }
+    }
 }
 
 // MARK: - Compatibility entry points for mediaremote-adapter.pl and Atoll

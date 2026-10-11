@@ -162,7 +162,7 @@ enum NotchNativePlayback {
                 applications.append(current)
             }
         }
-        var candidates: [(Target, NotchPlaybackSource)] = []
+        var candidates: [(Target, NotchPlaybackSource, Bool)] = []
         // A rate the player has not updated would rank a paused song as
         // playing. Its own state wins where it answers in time.
         var states: [Int32: Bool] = [:]
@@ -173,6 +173,11 @@ enum NotchNativePlayback {
             // process for routing, and use the parent app only for presentation/opening.
             candidate.applicationBundleIdentifier = presentation[candidate.pid]?.application
                 .flatMap { NotchPlaybackCommand.validIdentifier($0) ? $0 : nil }
+            if candidate.applicationBundleIdentifier == nil,
+               candidate.bundleIdentifier.hasPrefix("com.apple.WebKit"),
+               !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Safari").isEmpty {
+                candidate.applicationBundleIdentifier = "com.apple.Safari"
+            }
             if let parentID = candidate.applicationBundleIdentifier {
                 let parentApps = NSRunningApplication.runningApplications(withBundleIdentifier: parentID)
                 if parentApps.isEmpty || parentApps.allSatisfy({ $0.isTerminated }) {
@@ -188,13 +193,19 @@ enum NotchNativePlayback {
             }
             group.enter()
             readInfo(candidate, artwork: false, queue: callbacks) { info in
+                let isMusic = isMusicApp(app, parentBundleIdentifier: candidate.applicationBundleIdentifier)
+                let ratePlaying = (info?["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue ?? 0 > 0
+                let hasTitle = (info?["kMRMediaRemoteNowPlayingInfoTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                let duration = (info?["kMRMediaRemoteNowPlayingInfoDuration"] as? NSNumber)?.doubleValue ?? 0
+                let elapsed = (info?["kMRMediaRemoteNowPlayingInfoElapsedTime"] as? NSNumber)?.doubleValue ?? 0
+                let hasLiveTimeline = isMusic || duration > 0 || elapsed > 0
                 let source = NotchPlaybackSource(pid: candidate.pid, bundleIdentifier: candidate.bundleIdentifier,
-                    isMusicApp: isMusicApp(app, parentBundleIdentifier: candidate.applicationBundleIdentifier),
-                    isPlaying: (info?["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue ?? 0 > 0,
-                    hasTrack: (info?["kMRMediaRemoteNowPlayingInfoTitle"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                    isMusicApp: isMusic,
+                    isPlaying: ratePlaying,
+                    hasTrack: hasTitle && (ratePlaying || hasLiveTimeline),
                     displayName: presentation[candidate.pid]?.name ?? app.localizedName)
                 resultsLock.lock()
-                candidates.append((candidate, source))
+                candidates.append((candidate, source, hasTitle && hasLiveTimeline))
                 resultsLock.unlock()
                 group.leave()
             }
@@ -203,11 +214,12 @@ enum NotchNativePlayback {
         _ = group.wait(timeout: .now() + 1)
         _ = stateReads.wait(timeout: .now() + 0.2)
         resultsLock.lock()
-        let ready = candidates.map { candidate, source in
-            guard let playing = states[candidate.pid], playing != source.isPlaying else { return (candidate, source) }
+        let ready = candidates.map { candidate, source, hasPausedTrack in
+            let playing = states[candidate.pid] ?? source.isPlaying
+            let hasTrack = playing ? (source.hasTrack || hasPausedTrack) : hasPausedTrack
             return (candidate, NotchPlaybackSource(pid: source.pid, bundleIdentifier: source.bundleIdentifier,
                                                    isMusicApp: source.isMusicApp, isPlaying: playing,
-                                                   hasTrack: source.hasTrack, displayName: source.displayName))
+                                                   hasTrack: hasTrack, displayName: source.displayName))
         }
         resultsLock.unlock()
         let now = ProcessInfo.processInfo.systemUptime

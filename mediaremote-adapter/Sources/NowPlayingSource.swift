@@ -72,11 +72,20 @@ struct NotchPlaybackSource: Equatable {
         // paused music app as its system player. The opt-in follows their live
         // playback too; ownership only breaks a tie between eligible clients.
         let other = includeOtherPlayers ? available.filter { !$0.isMusicApp } : []
-        for candidates in [music.filter(\.isPlaying), other.filter(\.isPlaying), music] {
+        for candidates in [music.filter(\.isPlaying), other.filter(\.isPlaying)] {
             if let previous = candidates.first(where: { $0.pid == previousPID }) { return previous }
             if let current = candidates.first(where: { $0.pid == systemPID }) { return current }
             if let first = candidates.sorted(by: { $0.pid < $1.pid }).first { return first }
         }
-        return includeOtherPlayers ? available.first { $0.pid == systemPID && ($0.isMusicApp || $0.isPlaying) } : nil
+        if includeOtherPlayers {
+            if let previous = available.first(where: { $0.pid == previousPID }) { return previous }
+            if let current = available.first(where: { $0.pid == systemPID }) { return current }
+        }
+        for candidates in [music, other] {
+            if let previous = candidates.first(where: { $0.pid == previousPID }) { return previous }
+            if let current = candidates.first(where: { $0.pid == systemPID }) { return current }
+            if let first = candidates.sorted(by: { $0.pid < $1.pid }).first { return first }
+        }
+        return nil
     }
 }

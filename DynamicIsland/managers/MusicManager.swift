@@ -925,33 +925,6 @@ class MusicManager: ObservableObject {
             dismissTransientMusicPreview()
         }
 
-        // Check for playback state changes (playing/paused)
-        let eventIsPlaying = state.isPlaying
-        let expectedState = optimisticPlaybackTransition.expectedState
-        let shouldApplyPlaybackEvent = optimisticPlaybackTransition.shouldApply(
-            eventIsPlaying: eventIsPlaying
-        )
-
-        if shouldApplyPlaybackEvent {
-            if expectedState != nil {
-                optimisticPlayStateTimeoutTask?.cancel()
-                optimisticPlayStateTimeoutTask = nil
-            }
-
-            if eventIsPlaying != self.isPlaying {
-                let animation: Animation? = (expectedState == eventIsPlaying)
-                    ? .smooth(duration: 0.18)
-                    : .smooth
-                applyPlayState(eventIsPlaying, animation: animation)
-
-                if eventIsPlaying && !state.title.isEmpty && !state.artist.isEmpty {
-                    self.updateSneakPeek()
-                }
-            } else {
-                self.updateIdleState(state: eventIsPlaying)
-            }
-        }
-
         // Check for changes in track metadata using last artwork change values
         let titleChanged = state.title != self.lastArtworkTitle
         let artistChanged = state.artist != self.lastArtworkArtist
@@ -992,6 +965,37 @@ class MusicManager: ObservableObject {
         let durationChanged = state.duration != self.songDuration
         if durationChanged {
             self.songDuration = state.duration
+        }
+
+        if state.bundleIdentifier != self.bundleIdentifier {
+            self.bundleIdentifier = state.bundleIdentifier
+        }
+
+        // Check for playback state changes (playing/paused)
+        let eventIsPlaying = state.isPlaying
+        let expectedState = optimisticPlaybackTransition.expectedState
+        let shouldApplyPlaybackEvent = optimisticPlaybackTransition.shouldApply(
+            eventIsPlaying: eventIsPlaying
+        )
+
+        if shouldApplyPlaybackEvent {
+            if expectedState != nil {
+                optimisticPlayStateTimeoutTask?.cancel()
+                optimisticPlayStateTimeoutTask = nil
+            }
+
+            if eventIsPlaying != self.isPlaying {
+                let animation: Animation? = (expectedState == eventIsPlaying)
+                    ? .smooth(duration: 0.18)
+                    : .smooth
+                applyPlayState(eventIsPlaying, animation: animation)
+
+                if eventIsPlaying && !state.title.isEmpty && !state.artist.isEmpty {
+                    self.updateSneakPeek()
+                }
+            } else {
+                self.updateIdleState(state: eventIsPlaying)
+            }
         }
 
         // Handle artwork and visual transitions for changed content
@@ -1434,8 +1438,7 @@ class MusicManager: ObservableObject {
             debounceIdleTask?.cancel()
         } else {
             debounceIdleTask?.cancel()
-            let isDedicatedMusicApp = isAppleMusicActive || isSpotifyActive || bundleIdentifier == "com.tidal.desktop" || bundleIdentifier == "com.amazon.music"
-            if !hasActiveSession || songTitle.isEmpty || !isDedicatedMusicApp {
+            if !hasActiveSession || songTitle.isEmpty {
                 withAnimation {
                     self.isPlayerIdle = true
                 }

@@ -45,7 +45,7 @@ struct NotchQueueSelection: Equatable {
 
 /// A bounded command shared by the UI process and its playback adapter.
 enum NotchPlaybackCommand: Equatable {
-    case toggle, next, previous
+    case toggle, play, pause, next, previous
     case seek(Double)
     case queue(UUID), queueStop, queuePlay(NotchQueueSelection)
     case validate(UUID, NotchPlaybackContext)
@@ -56,6 +56,8 @@ enum NotchPlaybackCommand: Equatable {
         guard message.utf8.count <= Self.maximumMessageBytes else { return nil }
         switch message {
         case "toggle": self = .toggle
+        case "play": self = .play
+        case "pause": self = .pause
         case "next": self = .next
         case "previous": self = .previous
         case "queue-stop": self = .queueStop
@@ -100,7 +102,7 @@ enum NotchPlaybackCommand: Equatable {
 
     var requiresPlaybackContext: Bool {
         switch self {
-        case .toggle, .next, .previous, .seek: return true
+        case .toggle, .play, .pause, .next, .previous, .seek: return true
         case .queue, .queueStop, .queuePlay, .validate, .source: return false
         }
     }
@@ -108,6 +110,8 @@ enum NotchPlaybackCommand: Equatable {
     var message: String? {
         switch self {
         case .toggle: return "toggle"
+        case .play: return "play"
+        case .pause: return "pause"
         case .next: return "next"
         case .previous: return "previous"
         case .queue(let id): return "queue \(id.uuidString)"

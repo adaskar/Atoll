@@ -62,11 +62,27 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
     private var stdinPipe: Pipe?
+    private var lastCommandTransitionAt: Date = .distantPast
+    private var deferredEmptyUpdateTask: Task<Void, Never>?
+    private static let commandTransitionGracePeriod: TimeInterval = 1.5
 
-    private func sendCommandToAdapter(_ command: String) {
-        guard let data = "\(command)\n".data(using: .utf8),
-              let pipe = stdinPipe else { return }
-        try? pipe.fileHandleForWriting.write(contentsOf: data)
+    private func markCommandTransition() {
+        lastCommandTransitionAt = Date()
+        deferredEmptyUpdateTask?.cancel()
+        deferredEmptyUpdateTask = nil
+    }
+
+    @discardableResult
+    private func sendCommandToAdapter(_ command: String) -> Bool {
+        guard process?.isRunning == true,
+              let data = "\(command)\n".data(using: .utf8),
+              let pipe = stdinPipe else { return false }
+        do {
+            try pipe.fileHandleForWriting.write(contentsOf: data)
+            return true
+        } catch {
+            return false
+        }
     }
 
     // MARK: - Initialization
@@ -101,6 +117,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     deinit {
         streamTask?.cancel()
+        deferredEmptyUpdateTask?.cancel()
         
         try? self.stdinPipe?.fileHandleForWriting.close()
         self.stdinPipe = nil
@@ -123,33 +140,51 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Protocol Implementation
     func play() async {
-        sendCommandToAdapter("toggle")
-        MRMediaRemoteSendCommandFunction(0, nil)
+        markCommandTransition()
+        if !sendCommandToAdapter("play") {
+            MRMediaRemoteSendCommandFunction(0, nil)
+        }
     }
 
     func pause() async {
-        sendCommandToAdapter("toggle")
-        MRMediaRemoteSendCommandFunction(1, nil)
+        markCommandTransition()
+        if !sendCommandToAdapter("pause") {
+            MRMediaRemoteSendCommandFunction(1, nil)
+        }
     }
 
     func togglePlay() async {
-        sendCommandToAdapter("toggle")
-        MRMediaRemoteSendCommandFunction(2, nil)
+        markCommandTransition()
+        if !sendCommandToAdapter("toggle") {
+            MRMediaRemoteSendCommandFunction(2, nil)
+        }
     }
 
     func nextTrack() async {
-        sendCommandToAdapter("next")
-        MRMediaRemoteSendCommandFunction(4, nil)
+        markCommandTransition()
+        if !sendCommandToAdapter("next") {
+            MRMediaRemoteSendCommandFunction(4, nil)
+        }
     }
 
     func previousTrack() async {
-        sendCommandToAdapter("previous")
-        MRMediaRemoteSendCommandFunction(5, nil)
+        markCommandTransition()
+        if !sendCommandToAdapter("previous") {
+            MRMediaRemoteSendCommandFunction(5, nil)
+        }
     }
 
     func seek(to time: Double) async {
-        sendCommandToAdapter("seek \(time)")
-        MRMediaRemoteSetElapsedTimeFunction(time)
+        markCommandTransition()
+        await MainActor.run {
+            var updated = self.playbackState
+            updated.currentTime = time
+            updated.lastUpdated = Date()
+            self.playbackState = updated
+        }
+        if !sendCommandToAdapter("seek \(time)") {
+            MRMediaRemoteSetElapsedTimeFunction(time)
+        }
     }
 
     func isActive() -> Bool {
@@ -455,7 +490,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             newPlaybackState.artwork = Data(
                 base64Encoded: artworkDataString.trimmingCharacters(in: .whitespacesAndNewlines)
             )
-        } else if !diff {
+        } else if diff || payload.artworkUnchanged == true || (!newPlaybackState.title.isEmpty && newPlaybackState.title == self.playbackState.title && self.playbackState.artwork != nil) {
+            newPlaybackState.artwork = self.playbackState.artwork
+        } else {
             newPlaybackState.artwork = nil
         }
 
@@ -466,8 +503,27 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             payload.bundleIdentifier ??
             (diff ? self.playbackState.bundleIdentifier : "")
         )
-        
-        self.playbackState = newPlaybackState
+
+        if !newPlaybackState.title.isEmpty {
+            deferredEmptyUpdateTask?.cancel()
+            deferredEmptyUpdateTask = nil
+            self.playbackState = newPlaybackState
+        } else if !self.playbackState.title.isEmpty {
+            let elapsedSinceCommand = now.timeIntervalSince(lastCommandTransitionAt)
+            if elapsedSinceCommand < Self.commandTransitionGracePeriod {
+                let remaining = Self.commandTransitionGracePeriod - elapsedSinceCommand
+                deferredEmptyUpdateTask?.cancel()
+                deferredEmptyUpdateTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(remaining))
+                    guard !Task.isCancelled, let self else { return }
+                    self.playbackState = newPlaybackState
+                }
+                return
+            }
+            self.playbackState = newPlaybackState
+        } else {
+            self.playbackState = newPlaybackState
+        }
     }
 }
 
@@ -510,6 +566,7 @@ struct NowPlayingPayload: Codable {
     let shuffleMode: Int?
     let repeatMode: Int?
     let artworkData: String?
+    let artworkUnchanged: Bool?
     let timestamp: String?
     let playbackRate: Double?
     let playing: Bool?
@@ -522,7 +579,7 @@ struct NowPlayingPayload: Codable {
     private enum CodingKeys: String, CodingKey {
         case title, artist, album, duration, elapsedTime
         case durationMicros, elapsedTimeMicros, timestampEpochMicros
-        case shuffleMode, repeatMode, artworkData, timestamp
+        case shuffleMode, repeatMode, artworkData, artworkUnchanged, timestamp
         case playbackRate, playing
         case parentApplicationBundleIdentifier, bundleIdentifier
     }
@@ -531,6 +588,7 @@ struct NowPlayingPayload: Codable {
         case isPlaying
         case displayID
         case artworkBase64
+        case artworkUnchanged
         case kMRMediaRemoteNowPlayingInfoTitle
         case kMRMediaRemoteNowPlayingInfoArtist
         case kMRMediaRemoteNowPlayingInfoAlbum
@@ -560,6 +618,8 @@ struct NowPlayingPayload: Codable {
         repeatMode = try container.decodeIfPresent(Int.self, forKey: .repeatMode)
         artworkData = try container.decodeIfPresent(String.self, forKey: .artworkData)
             ?? fallback.decodeIfPresent(String.self, forKey: .artworkBase64)
+        artworkUnchanged = try container.decodeIfPresent(Bool.self, forKey: .artworkUnchanged)
+            ?? fallback.decodeIfPresent(Bool.self, forKey: .artworkUnchanged)
         timestamp = try container.decodeIfPresent(String.self, forKey: .timestamp)
         playbackRate = try container.decodeIfPresent(Double.self, forKey: .playbackRate)
             ?? fallback.decodeIfPresent(Double.self, forKey: .kMRMediaRemoteNowPlayingInfoPlaybackRate)
