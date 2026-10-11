@@ -25,8 +25,6 @@ struct NotchUSBDevicesView: View {
     @ObservedObject private var manager = USBDeviceManager.shared
     @Default(.usbTreeViewEnabled) private var isTreeViewEnabled
     @State private var hoveredDeviceID: UInt64?
-    @State private var expandedDeviceIDs: Set<UInt64> = []
-    @State private var collapsedHubBranchIDs: Set<UInt64> = []
     @State private var highlightedDeviceID: UInt64?
     @State private var highlightClearTask: Task<Void, Never>?
     @State private var suppressionToken = UUID()
@@ -80,8 +78,8 @@ struct NotchUSBDevicesView: View {
                                     USBNotchTreeGroupView(
                                         node: node,
                                         hoveredDeviceID: $hoveredDeviceID,
-                                        expandedDeviceIDs: $expandedDeviceIDs,
-                                        collapsedHubBranchIDs: $collapsedHubBranchIDs,
+                                        expandedDeviceIDs: $manager.notchExpandedDeviceIDs,
+                                        collapsedHubBranchIDs: $manager.notchCollapsedHubBranchIDs,
                                         highlightedDeviceID: highlightedDeviceID,
                                         ejectingDeviceIDs: manager.ejectingDeviceIDs,
                                         onEject: { dev in manager.ejectDevice(dev) },
@@ -101,7 +99,7 @@ struct NotchUSBDevicesView: View {
                                         treeChildCount: 0,
                                         isTreeBranchCollapsed: false,
                                         isHovered: hoveredDeviceID == device.id,
-                                        isExpanded: expandedDeviceIDs.contains(device.id),
+                                        isExpanded: manager.notchExpandedDeviceIDs.contains(device.id),
                                         isHighlighted: highlightedDeviceID == device.id,
                                         isEjecting: manager.ejectingDeviceIDs.contains(device.id),
                                         onToggleExpand: {
@@ -148,10 +146,10 @@ struct NotchUSBDevicesView: View {
 
     private func toggleExpand(for id: UInt64) {
         withAnimation(.easeInOut(duration: 0.16)) {
-            if expandedDeviceIDs.contains(id) {
-                expandedDeviceIDs.remove(id)
+            if manager.notchExpandedDeviceIDs.contains(id) {
+                manager.notchExpandedDeviceIDs.remove(id)
             } else {
-                expandedDeviceIDs.insert(id)
+                manager.notchExpandedDeviceIDs.insert(id)
             }
         }
     }
@@ -159,7 +157,7 @@ struct NotchUSBDevicesView: View {
     private func focusAndHighlightDevice(_ targetID: UInt64, using proxy: ScrollViewProxy) {
         highlightClearTask?.cancel()
         withAnimation(.easeInOut(duration: 0.22)) {
-            expandedDeviceIDs.insert(targetID)
+            manager.notchExpandedDeviceIDs.insert(targetID)
             highlightedDeviceID = targetID
             proxy.scrollTo(targetID, anchor: .center)
         }

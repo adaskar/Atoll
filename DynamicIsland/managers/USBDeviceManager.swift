@@ -422,6 +422,8 @@ final class USBDeviceManager: ObservableObject {
     @Published private(set) var ejectingDeviceIDs: Set<UInt64> = []
     @Published var lastEjectError: String?
     @Published var showHubsOverride: Bool = false
+    @Published var notchExpandedDeviceIDs: Set<UInt64> = []
+    @Published var notchCollapsedHubBranchIDs: Set<UInt64> = []
 
     private var notifyPort: IONotificationPortRef?
     private var usbAddedIter: io_iterator_t = 0
@@ -465,6 +467,13 @@ final class USBDeviceManager: ObservableObject {
                 }
             }
             .store(in: &cancellables)
+
+        Defaults.publisher(keys: .usbTreeViewEnabled, .hideUSBHubsAndInternal, options: [])
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Filtered Views & Topology Tree
@@ -506,7 +515,15 @@ final class USBDeviceManager: ObservableObject {
 
     /// Hierarchical topology tree of connected devices for Tree View mode.
     var displayedTreeNodes: [USBDeviceTreeNode] {
-        let items = displayedDevices
+        let candidates = externalDevices
+        let items: [USBDeviceItem]
+        if Defaults[.hideUSBHubsAndInternal] && !showHubsOverride {
+            // Keep parent hubs that have active sub-devices so the tree hierarchy remains intact
+            let filtered = candidates.filter { !$0.isHub || !$0.childDeviceIDs.isEmpty }
+            items = filtered.isEmpty ? candidates : filtered
+        } else {
+            items = candidates
+        }
         guard !items.isEmpty else { return [] }
         let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
 
@@ -562,6 +579,83 @@ final class USBDeviceManager: ObservableObject {
         }
 
         return sortedRoots.map { buildNode($0, depth: 0) }
+    }
+
+    /// Dynamically calculates the open-notch height when the `.usbDevices` tab is active,
+    /// scaling by connected item count (and expanded states) up to the same maximum height limit
+    /// used by the Terminal notch view (`terminalMaxHeightFraction`).
+    func preferredNotchHeight(baseHeight: CGFloat, screen: NSScreen? = NSScreen.main) -> CGFloat {
+        let minHeight = max(baseHeight, NotesLayoutState.list.preferredHeight)
+        let screenHeight = (screen ?? NSScreen.main)?.visibleFrame.height ?? 800
+        let maxFraction = Defaults[.terminalMaxHeightFraction]
+        let maxLimit = min(screenHeight * maxFraction, max(300, screenHeight * maxFraction))
+
+        guard !displayedDevices.isEmpty else {
+            return minHeight
+        }
+
+        // Top notch header bar + USB tab header + bottom content inset
+        var estimatedHeight: CGFloat = 96
+        if lastEjectError != nil {
+            estimatedHeight += 36
+        }
+
+        if Defaults[.usbTreeViewEnabled] {
+            let treeNodes = displayedTreeNodes
+            func measureTreeNode(_ node: USBDeviceTreeNode, isRoot: Bool) -> CGFloat {
+                var h: CGFloat = isRoot ? 82 : 70
+                if !node.device.mountedVolumes.isEmpty {
+                    h += CGFloat(node.device.mountedVolumes.count) * 32
+                }
+                if notchExpandedDeviceIDs.contains(node.id) {
+                    h += 120
+                }
+                if !node.children.isEmpty && !notchCollapsedHubBranchIDs.contains(node.id) {
+                    for child in node.children {
+                        h += 6 + measureTreeNode(child, isRoot: false)
+                    }
+                }
+                return h
+            }
+
+            for (index, rootNode) in treeNodes.enumerated() {
+                if index > 0 {
+                    estimatedHeight += 8
+                }
+                estimatedHeight += measureTreeNode(rootNode, isRoot: true)
+            }
+        } else {
+            let items = displayedDevices
+            func measureGridCard(_ device: USBDeviceItem) -> CGFloat {
+                var h: CGFloat = 82
+                let kids = childDevices(for: device)
+                if !kids.isEmpty {
+                    h += 28 + CGFloat(kids.count) * 28
+                }
+                if !device.mountedVolumes.isEmpty {
+                    h += CGFloat(device.mountedVolumes.count) * 32
+                }
+                if notchExpandedDeviceIDs.contains(device.id) {
+                    h += 120
+                }
+                return h
+            }
+
+            var rowIndex = 0
+            var idx = 0
+            while idx < items.count {
+                if rowIndex > 0 {
+                    estimatedHeight += 8
+                }
+                let firstHeight = measureGridCard(items[idx])
+                let secondHeight = (idx + 1 < items.count) ? measureGridCard(items[idx + 1]) : 0
+                estimatedHeight += max(firstHeight, secondHeight)
+                idx += 2
+                rowIndex += 1
+            }
+        }
+
+        return min(max(minHeight, estimatedHeight.rounded()), maxLimit)
     }
 
     // MARK: - Lifecycle

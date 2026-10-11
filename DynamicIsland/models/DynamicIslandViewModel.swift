@@ -424,8 +424,13 @@ class DynamicIslandViewModel: NSObject, ObservableObject {
         var adjustedSize = baseSize
 
         if coordinator.currentView == .notes || coordinator.currentView == .clipboard {
-            let preferred = coordinator.notesLayoutState.preferredHeight
+            let preferred = coordinator.currentView == .notes ? coordinator.notesLayoutState.preferredHeight : NotesLayoutState.list.preferredHeight
             adjustedSize.height = max(adjustedSize.height, preferred)
+            return adjustedSize
+        }
+
+        if coordinator.currentView == .usbDevices {
+            adjustedSize.height = USBDeviceManager.shared.preferredNotchHeight(baseHeight: adjustedSize.height)
             return adjustedSize
         }
 

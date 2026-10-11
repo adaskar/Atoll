@@ -640,9 +640,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else if coordinator.currentView == .notes {
             let preferredHeight = coordinator.notesLayoutState.preferredHeight
             baseSize.height = max(baseSize.height, preferredHeight)
-        } else if coordinator.currentView == .clipboard || coordinator.currentView == .usbDevices {
-            // Clipboard and USB devices have their own fixed height source; don't inherit the notes layout state.
+        } else if coordinator.currentView == .clipboard {
+            // Clipboard has its own fixed height source; don't inherit the notes layout state.
             baseSize.height = max(baseSize.height, NotesLayoutState.list.preferredHeight)
+        } else if coordinator.currentView == .usbDevices {
+            baseSize.height = usbDeviceManager.preferredNotchHeight(baseHeight: baseSize.height)
         } else if coordinator.currentView == .terminal {
             let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
             let maxFraction = Defaults[.terminalMaxHeightFraction]
@@ -914,6 +916,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateWindowSizeIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+
+        usbDeviceManager.objectWillChange
+            .sink { [weak self] _ in
+                guard let self, self.coordinator.currentView == .usbDevices else { return }
+                DispatchQueue.main.async {
+                    self.updateWindowSizeIfNeeded()
                 }
             }
             .store(in: &cancellables)

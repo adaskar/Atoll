@@ -205,10 +205,15 @@ struct ContentView: View {
             return CGSize(width: baseSize.width, height: resolvedHeight)
         }
 
-        if coordinator.currentView == .clipboard || coordinator.currentView == .usbDevices {
-            // Clipboard and USB Devices have their own fixed height source; don't inherit whatever notes
+        if coordinator.currentView == .clipboard {
+            // Clipboard has its own fixed height source; don't inherit whatever notes
             // layout state happens to be set.
             let resolvedHeight = max(baseSize.height, NotesLayoutState.list.preferredHeight)
+            return CGSize(width: baseSize.width, height: resolvedHeight)
+        }
+
+        if coordinator.currentView == .usbDevices {
+            let resolvedHeight = usbDeviceManager.preferredNotchHeight(baseHeight: baseSize.height)
             return CGSize(width: baseSize.width, height: resolvedHeight)
         }
 
@@ -896,6 +901,7 @@ struct ContentView: View {
             maxHeight: (dynamicNotchSize.height + (vm.notchState == .open ? 12 : 0) + (isIslandMode ? 0 : notchTopScreenBleedAmount) + (isDynamicIslandMode ? dynamicIslandTopOffset + dynamicIslandShadowInset * 2 : currentShadowPadding)).rounded(),
             alignment: .top
         )
+        .animation(.smooth(duration: 0.22), value: dynamicNotchSize.height)
         .animation(nil, value: vm.notchState)
         .background(dragDetector, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
