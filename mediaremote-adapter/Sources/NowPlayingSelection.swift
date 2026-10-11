@@ -316,9 +316,11 @@ enum NotchNativePlayback {
                 let estimatedElapsed = elapsed + age * max(0, rate)
                 // Browsers/WebKit often leave dormant media widgets (duration > 0, elapsed == 0, rate == 0)
                 // or finished/closed tabs whose extrapolated elapsed time has blown past duration.
+                // Note: a newly opened YouTube video starts with elapsed == 0 (and either rate > 0 or a fresh timestamp < 2s old).
+                let isFreshStart = sampleDate != nil && age < 2.0
                 let hasLiveTimeline = isMusic
-                    || (duration > 0 && elapsed > 0 && estimatedElapsed <= duration + 1.5)
-                    || (duration <= 0 && elapsed > 0)
+                    || (duration > 0 && (elapsed > 0 || rate > 0 || isFreshStart) && estimatedElapsed <= duration + 1.5)
+                    || (duration <= 0 && (elapsed > 0 || rate > 0 || isFreshStart))
                 let source = NotchPlaybackSource(pid: candidate.pid, bundleIdentifier: candidate.bundleIdentifier,
                     isMusicApp: isMusic,
                     isPlaying: rate > 0,
@@ -335,6 +337,7 @@ enum NotchNativePlayback {
         _ = group.wait(timeout: .now() + 1)
         _ = stateReads.wait(timeout: .now() + 0.2)
         let now = ProcessInfo.processInfo.systemUptime
+        let wallNow = Date()
         let activePIDs = Set(applications.map(\.processIdentifier))
         let ready: [(Target, NotchPlaybackSource)] = resultsLock.withLock {
             lock.lock()
@@ -345,7 +348,10 @@ enum NotchNativePlayback {
             nextSilenceCheck = nil
             return candidates.map { candidate, source in
                 let mrPlaying = states[candidate.pid] ?? source.isPlaying
-                let currentIdentity = candidateInfos[candidate.pid].flatMap(Identity.init)
+                let info = candidateInfos[candidate.pid]
+                let currentIdentity = info.flatMap(Identity.init)
+                let sampleDate = info?["kMRMediaRemoteNowPlayingInfoTimestamp"] as? Date
+                let sampleAge = sampleDate.map { max(0, wallNow.timeIntervalSince($0)) } ?? .infinity
 
                 var resolvedPlaying = mrPlaying
                 var resolvedHasTrack = source.hasTrack
@@ -369,26 +375,42 @@ enum NotchNativePlayback {
                             resolvedPlaying = true
                         } else {
                             let wasAudioActive = audioActivePIDs.contains(candidate.pid)
+                            let isDeadIdentity = (currentIdentity != nil && deadBrowserIdentity[candidate.pid] == currentIdentity)
                             let firstSilent = silentSince[candidate.pid] ?? {
                                 silentSince[candidate.pid] = now
                                 return now
                             }()
                             let silentDuration = now - firstSilent
-                            if !wasAudioActive || silentDuration >= 0.25 {
-                                // Browser/WebKit helper still claims playing in MediaRemote,
-                                // but CoreAudio confirms zero audio output (either never
-                                // active in this session or drained for >= 0.25s).
+                            if wasAudioActive {
+                                if silentDuration >= 0.25 {
+                                    // Previously active browser/WebKit helper stopped outputting audio for >= 0.25s (tab closed).
+                                    resolvedPlaying = false
+                                    resolvedHasTrack = false
+                                    audioActivePIDs.remove(candidate.pid)
+                                    silentSince.removeValue(forKey: candidate.pid)
+                                    if let currentIdentity {
+                                        deadBrowserIdentity[candidate.pid] = currentIdentity
+                                    }
+                                } else {
+                                    resolvedPlaying = true
+                                    let checkDeadline = firstSilent + 0.25
+                                    nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                                }
+                            } else if !isDeadIdentity && sampleAge < 1.2 && silentDuration < 0.8 {
+                                // Brand-new video/track just started (< 1.2s old sample) and CoreAudio HAL
+                                // hasn't flipped isRunningOutput=1 yet. Wait briefly and re-verify once.
                                 resolvedPlaying = false
                                 resolvedHasTrack = false
-                                audioActivePIDs.remove(candidate.pid)
+                                let checkDeadline = now + 0.25
+                                nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                            } else {
+                                // Stale zombie session from a previously closed tab: reject immediately with no timer.
+                                resolvedPlaying = false
+                                resolvedHasTrack = false
                                 silentSince.removeValue(forKey: candidate.pid)
                                 if let currentIdentity {
                                     deadBrowserIdentity[candidate.pid] = currentIdentity
                                 }
-                            } else {
-                                resolvedPlaying = true
-                                let checkDeadline = firstSilent + 0.25
-                                nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
                             }
                         }
                     } else {
@@ -414,6 +436,12 @@ enum NotchNativePlayback {
                             if let deadID = deadBrowserIdentity[candidate.pid], deadID == currentIdentity {
                                 resolvedHasTrack = false
                             } else if !audioActivePIDs.contains(candidate.pid) && !wasPreviouslySelected && now >= commandGraceUntil {
+                                // If the track was just loaded (< 1.2s ago), schedule a single re-check in case
+                                // playback starts right after metadata is registered.
+                                if sampleAge < 1.2 {
+                                    let checkDeadline = now + 0.25
+                                    nextSilenceCheck = nextSilenceCheck.map { min($0, checkDeadline) } ?? checkDeadline
+                                }
                                 // Ignore stale paused browser sessions that never actively played audio.
                                 resolvedHasTrack = false
                             }
