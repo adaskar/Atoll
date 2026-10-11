@@ -131,6 +131,11 @@ func enabledStandardTabCount() -> Int {
         count += 1
     }
 
+    // USB tab (only in .tab display mode)
+    if Defaults[.enableUSBDeviceFeature] && Defaults[.usbDisplayMode] == .tab {
+        count += 1
+    }
+
     return count
 }
 

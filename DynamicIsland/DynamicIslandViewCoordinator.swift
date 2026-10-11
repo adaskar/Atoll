@@ -99,7 +99,7 @@ class DynamicIslandViewCoordinator: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var hoverOpenSuppressedUntil: Date = .distantPast
     
-    private static let tabOrder: [NotchViews] = [.home, .shelf, .timer, .stats, .llmUsage, .colorPicker, .notes, .clipboard, .terminal, .extensionExperience]
+    private static let tabOrder: [NotchViews] = [.home, .shelf, .timer, .stats, .llmUsage, .colorPicker, .notes, .clipboard, .terminal, .usbDevices, .extensionExperience]
     
     /// Direction of the most recent tab switch (true = forward/right, false = backward/left)
     @Published var tabSwitchForward: Bool = true
@@ -180,6 +180,20 @@ class DynamicIslandViewCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        Defaults.publisher(.usbDisplayMode)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleUSBDisplayModeChange(change.newValue)
+            }
+            .store(in: &cancellables)
+
+        Defaults.publisher(.enableUSBDeviceFeature)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] change in
+                self?.handleUSBFeatureToggle(change.newValue)
+            }
+            .store(in: &cancellables)
+
         Defaults.publisher(.enableMinimalisticUI)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] change in
@@ -230,6 +244,8 @@ class DynamicIslandViewCoordinator: ObservableObject {
             Defaults.publisher(.enableClipboardManager).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.clipboardDisplayMode).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.enableTerminalFeature).map { _ in () }.eraseToAnyPublisher(),
+            Defaults.publisher(.enableUSBDeviceFeature).map { _ in () }.eraseToAnyPublisher(),
+            Defaults.publisher(.usbDisplayMode).map { _ in () }.eraseToAnyPublisher(),
             Defaults.publisher(.enableMinimalisticUI).map { _ in () }.eraseToAnyPublisher()
         )
         .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
@@ -266,6 +282,20 @@ class DynamicIslandViewCoordinator: ObservableObject {
 
     private func handleTimerFeatureToggle(_ isEnabled: Bool) {
         guard !isEnabled, currentView == .timer else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleUSBDisplayModeChange(_ mode: USBDisplayMode) {
+        guard mode == .popover, currentView == .usbDevices else { return }
+        withAnimation(.smooth) {
+            currentView = .home
+        }
+    }
+
+    private func handleUSBFeatureToggle(_ isEnabled: Bool) {
+        guard !isEnabled, currentView == .usbDevices else { return }
         withAnimation(.smooth) {
             currentView = .home
         }

@@ -53,6 +53,8 @@ struct TabSelectionView: View {
     @Default(.enableStatsFeature) var enableStatsFeature
     @Default(.enableColorPickerFeature) var enableColorPickerFeature
     @Default(.timerDisplayMode) var timerDisplayMode
+    @Default(.enableUSBDeviceFeature) var enableUSBDeviceFeature
+    @Default(.usbDisplayMode) var usbDisplayMode
     @Default(.enableThirdPartyExtensions) private var enableThirdPartyExtensions
     @Default(.enableExtensionNotchExperiences) private var enableExtensionNotchExperiences
     @Default(.enableExtensionNotchTabs) private var enableExtensionNotchTabs
@@ -94,6 +96,9 @@ struct TabSelectionView: View {
         }
         if Defaults[.enableTerminalFeature] {
             tabsArray.append(TabModel(label: "Terminal", icon: "apple.terminal", view: .terminal))
+        }
+        if enableUSBDeviceFeature && usbDisplayMode == .tab {
+            tabsArray.append(TabModel(label: "USB", icon: "cable.connector.horizontal", view: .usbDevices))
         }
         if extensionTabsEnabled {
             for payload in extensionTabPayloads {

@@ -1348,6 +1348,15 @@ extension Defaults.Keys {
     static let caffeinateDefaultDuration = Key<CaffeinateDuration>("caffeinateDefaultDuration", default: .indefinite)
     static let caffeinateKeepsDisplayAwake = Key<Bool>("caffeinateKeepsDisplayAwake", default: true)
 
+    // MARK: USB Devices Feature
+    static let enableUSBDeviceFeature = Key<Bool>("enableUSBDeviceFeature", default: true)
+    static let showUSBConnectionHUD = Key<Bool>("showUSBConnectionHUD", default: true)
+    static let usbDisplayMode = Key<USBDisplayMode>("usbDisplayMode", default: .popover)
+    static let showUSBDevicesIcon = Key<Bool>("showUSBDevicesIcon", default: true)
+    static let hideUSBHubsAndInternal = Key<Bool>("hideUSBHubsAndInternal", default: true)
+    static let playUSBConnectionSound = Key<Bool>("playUSBConnectionSound", default: false)
+    static let enableUSBConnectionHaptics = Key<Bool>("enableUSBConnectionHaptics", default: true)
+
     // MARK: ColorPicker Feature
     static let enableColorPickerFeature = Key<Bool>("enableColorPickerFeature", default: true)
     static let showColorFormats = Key<Bool>("showColorFormats", default: true)

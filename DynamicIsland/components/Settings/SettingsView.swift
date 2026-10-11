@@ -481,6 +481,15 @@ private enum SettingsSearchIndex {
         SettingsSearchEntry(tab: .terminal, title: "Scrollback lines", keywords: ["terminal", "scrollback", "buffer", "history"], highlightID: SettingsTab.terminal.highlightID(for: "Scrollback lines")),
         SettingsSearchEntry(tab: .terminal, title: "Option as Meta", keywords: ["terminal", "option", "meta", "alt", "key"], highlightID: SettingsTab.terminal.highlightID(for: "Option as Meta")),
         SettingsSearchEntry(tab: .terminal, title: "Mouse reporting", keywords: ["terminal", "mouse", "reporting", "vim", "tmux"], highlightID: SettingsTab.terminal.highlightID(for: "Mouse reporting")),
+
+        // USB Devices
+        SettingsSearchEntry(tab: .devices, title: "Enable USB device monitoring", keywords: ["usb", "cable", "whatcable", "devices", "drive", "flash", "plug", "unplug"], highlightID: SettingsTab.devices.highlightID(for: "Enable USB device monitoring")),
+        SettingsSearchEntry(tab: .devices, title: "Show plug and unplug HUD notifications", keywords: ["usb", "hud", "notification", "plug", "unplug", "connect", "disconnect"], highlightID: SettingsTab.devices.highlightID(for: "Show plug and unplug HUD notifications")),
+        SettingsSearchEntry(tab: .devices, title: "USB Display mode", keywords: ["usb", "display mode", "popover", "tab", "list"], highlightID: SettingsTab.devices.highlightID(for: "USB Display mode")),
+        SettingsSearchEntry(tab: .devices, title: "Show USB icon in the notch", keywords: ["usb", "icon", "header", "notch"], highlightID: SettingsTab.devices.highlightID(for: "Show USB icon in the notch")),
+        SettingsSearchEntry(tab: .devices, title: "Hide USB hubs by default", keywords: ["usb", "hub", "internal", "filter"], highlightID: SettingsTab.devices.highlightID(for: "Hide USB hubs by default")),
+        SettingsSearchEntry(tab: .devices, title: "Play sound on plug and unplug", keywords: ["usb", "sound", "chime", "audio"], highlightID: SettingsTab.devices.highlightID(for: "Play sound on plug and unplug")),
+        SettingsSearchEntry(tab: .devices, title: "Haptic feedback on plug and unplug", keywords: ["usb", "haptic", "feedback", "vibration"], highlightID: SettingsTab.devices.highlightID(for: "Haptic feedback on plug and unplug")),
     ]
 
     /// Which segment of the Lock Screen tab a search result lives on, or nil
@@ -2721,6 +2730,8 @@ private struct DevicesSettingsView: View {
     @Default(.progressBarStyle) var progressBarStyle
     @Default(.useBluetoothHUD3DIcon) private var useBluetoothHUD3DIcon
     @Default(.enablePerAppVolume) private var enablePerAppVolume
+    @Default(.enableUSBDeviceFeature) private var enableUSBDeviceFeature
+    @Default(.usbDisplayMode) private var usbDisplayMode
 
     private func highlightID(_ title: String) -> String {
         SettingsTab.devices.highlightID(for: title)
@@ -2753,6 +2764,71 @@ private struct DevicesSettingsView: View {
                 Text("App Volume")
             } footer: {
                 Text("Gives each app its own volume and mute, independent of the system volume. macOS will ask for audio recording permission the first time an app's level is changed: routing an app's audio through Atoll is the only way it can be adjusted, and nothing is ever recorded or written to disk. Apps left at 100% and unmuted keep their normal, untouched path to the speakers.")
+            }
+
+            Section {
+                Defaults.Toggle(key: .enableUSBDeviceFeature) {
+                    Text("Enable USB device monitoring")
+                }
+                .settingsHighlight(id: highlightID("Enable USB device monitoring"))
+
+                Defaults.Toggle(key: .showUSBConnectionHUD) {
+                    Text("Show plug and unplug HUD notifications")
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Show plug and unplug HUD notifications"))
+
+                Picker("Display mode", selection: $usbDisplayMode) {
+                    ForEach(USBDisplayMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("USB Display mode"))
+
+                if usbDisplayMode == .popover {
+                    Defaults.Toggle(key: .showUSBDevicesIcon) {
+                        Text("Show USB icon in the notch")
+                    }
+                    .disabled(!enableUSBDeviceFeature)
+                    .settingsHighlight(id: highlightID("Show USB icon in the notch"))
+                }
+
+                Defaults.Toggle(key: .hideUSBHubsAndInternal) {
+                    Text("Hide USB hubs by default")
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Hide USB hubs by default"))
+
+                Defaults.Toggle(key: .playUSBConnectionSound) {
+                    Text("Play sound on plug and unplug")
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Play sound on plug and unplug"))
+
+                Defaults.Toggle(key: .enableUSBConnectionHaptics) {
+                    Text("Haptic feedback on plug and unplug")
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Haptic feedback on plug and unplug"))
+
+                HStack(spacing: 12) {
+                    Button("Test Plugged HUD") {
+                        USBDeviceManager.shared.presentTestHUD(connected: true)
+                    }
+                    .disabled(!enableUSBDeviceFeature)
+
+                    Button("Test Unplugged HUD") {
+                        USBDeviceManager.shared.presentTestHUD(connected: false)
+                    }
+                    .disabled(!enableUSBDeviceFeature)
+                }
+            } header: {
+                Text("USB Devices")
+            } footer: {
+                Text("Monitors external USB ports for device connections, displays negotiated USB speed and power draw, and lets you browse or eject mounted USB drives from the notch.")
+                    .foregroundStyle(.secondary)
+                    .font(.caption)
             }
 
             Section {

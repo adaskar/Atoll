@@ -53,6 +53,7 @@ struct ContentView: View {
     @ObservedObject var doNotDisturbManager = DoNotDisturbManager.shared
     @ObservedObject var lockScreenManager = LockScreenManager.shared
     @ObservedObject private var networkConnectivityManager = NetworkConnectivityManager.shared
+    @ObservedObject private var usbDeviceManager = USBDeviceManager.shared
     @ObservedObject private var menuBarLayout = MenuBarLayout.shared
     /// Width of the closed-notch content, measured so its left edge can be
     /// compared against the frontmost app's menus. Only the *size* is read --
@@ -117,6 +118,15 @@ struct ContentView: View {
                effectiveClosedNotchHeight: vm.effectiveClosedNotchHeight
            ) {
             return connectivitySize
+        }
+
+        if isUSBHUDVisible,
+           let usbSize = USBConnectionHUDMetrics.size(
+               for: usbDeviceManager.hudState,
+               closedNotchSize: vm.closedNotchSize,
+               effectiveClosedNotchHeight: vm.effectiveClosedNotchHeight
+           ) {
+            return usbSize
         }
         
         // When inline sneak peek is active in closed notch, use the wider inline width
@@ -195,8 +205,8 @@ struct ContentView: View {
             return CGSize(width: baseSize.width, height: resolvedHeight)
         }
 
-        if coordinator.currentView == .clipboard {
-            // Clipboard has its own fixed height source; don't inherit whatever notes
+        if coordinator.currentView == .clipboard || coordinator.currentView == .usbDevices {
+            // Clipboard and USB Devices have their own fixed height source; don't inherit whatever notes
             // layout state happens to be set.
             let resolvedHeight = max(baseSize.height, NotesLayoutState.list.preferredHeight)
             return CGSize(width: baseSize.width, height: resolvedHeight)
@@ -447,11 +457,21 @@ struct ContentView: View {
             && vm.notchState == .closed
             && !isSneakPeekVisibleOnCurrentScreen
             && !isConnectivityHUDVisible
+            && !isUSBHUDVisible
     }
 
     private var isConnectivityHUDVisible: Bool {
         NetworkConnectivityHUDMetrics.isPresented(
             state: networkConnectivityManager.hudState,
+            notchState: vm.notchState,
+            hideOnClosed: vm.hideOnClosed,
+            isLocked: lockScreenManager.isLocked
+        )
+    }
+
+    private var isUSBHUDVisible: Bool {
+        USBConnectionHUDMetrics.isPresented(
+            state: usbDeviceManager.hudState,
             notchState: vm.notchState,
             hideOnClosed: vm.hideOnClosed,
             isLocked: lockScreenManager.isLocked
@@ -636,6 +656,17 @@ struct ContentView: View {
                 )
             )
         }
+        if isUSBHUDVisible {
+            if isDynamicIslandMode {
+                return AnyShape(DynamicIslandPillShape(cornerRadius: 24))
+            }
+            return AnyShape(
+                NotchShape(
+                    topCornerRadius: activeCornerRadiusInsets.closed.top,
+                    bottomCornerRadius: 20
+                )
+            )
+        }
         if let activeClosedRecordingSurfaceShape {
             return activeClosedRecordingSurfaceShape
         }
@@ -658,7 +689,7 @@ struct ContentView: View {
             // Connectivity HUD metrics already describe the complete surface.
             // Applying the regular closed-notch inset here makes that surface
             // wider than both the root view and its NSWindow, clipping both sides.
-            .padding(.horizontal, isConnectivityHUDVisible ? 0 : notchHorizontalPadding)
+            .padding(.horizontal, (isConnectivityHUDVisible || isUSBHUDVisible) ? 0 : notchHorizontalPadding)
             .padding([.horizontal, .bottom], vm.notchState == .open ? 12 : 0)
             .background(.black)
             .clipShape(resolvedClipShape)
@@ -716,7 +747,7 @@ struct ContentView: View {
                         handleHover(hovering)
                     }
                     .onTapGesture {
-                        guard !isConnectivityHUDVisible else { return }
+                        guard !isConnectivityHUDVisible && !isUSBHUDVisible else { return }
                         guard !recordingOpenGestureLocked else { return }
                         if handleClosedMusicWaveformTapIfNeeded() {
                             return
@@ -1071,6 +1102,12 @@ struct ContentView: View {
                           closedNotchSize: vm.closedNotchSize,
                           effectiveClosedNotchHeight: vm.effectiveClosedNotchHeight
                       )
+                  } else if isUSBHUDVisible {
+                      USBConnectionHUD(
+                          state: usbDeviceManager.hudState,
+                          closedNotchSize: vm.closedNotchSize,
+                          effectiveClosedNotchHeight: vm.effectiveClosedNotchHeight
+                      )
                   } else if coordinator.firstLaunch {
                       Spacer()
                       HelloAnimation().frame(width: 200, height: 80).onAppear(perform: {
@@ -1283,12 +1320,12 @@ struct ContentView: View {
                   }
               }
               .pinnedLyrics(isVisible: pinnedLyricsVisible,
-                  isContentHidden: isSneakPeekVisibleOnCurrentScreen || isConnectivityHUDVisible)
+                  isContentHidden: isSneakPeekVisibleOnCurrentScreen || isConnectivityHUDVisible || isUSBHUDVisible)
               // A connectivity HUD must remain centred on the physical notch:
               // its middle transparent lane is what keeps both wings visible.
               // Menu-bar clearance would shift that lane underneath the camera
               // housing and clip one of the two content areas.
-              .offset(x: isConnectivityHUDVisible ? 0 : menuBarClearanceOffset)
+              .offset(x: (isConnectivityHUDVisible || isUSBHUDVisible) ? 0 : menuBarClearanceOffset)
               .animation(.smooth(duration: 0.25), value: menuBarClearanceOffset)
               .zIndex(2)
               
@@ -1314,6 +1351,8 @@ struct ContentView: View {
                                 NotchClipboardView()
                             case .terminal:
                                 NotchTerminalView()
+                            case .usbDevices:
+                                NotchUSBDevicesView()
                             case .extensionExperience:
                                 if let payload = currentExtensionTabPayload() {
                                     ExtensionNotchExperienceTabView(payload: payload)
@@ -2348,6 +2387,7 @@ struct ContentView: View {
             guard vm.notchState == .closed,
                 !isSneakPeekVisibleOnCurrentScreen,
                 !isConnectivityHUDVisible,
+                !isUSBHUDVisible,
                 !recordingLiveActivityVisibleOnClosedNotch,
                 (Defaults[.openNotchOnHover] || shouldFocusTimerTab) else { return }
 
@@ -2362,6 +2402,7 @@ struct ContentView: View {
                           !self.recordingLiveActivityVisibleOnClosedNotch,
                           !self.isSneakPeekVisibleOnCurrentScreen,
                           !self.isConnectivityHUDVisible,
+                          !self.isUSBHUDVisible,
                           !self.coordinator.isHoverOpenSuppressed else { return }
 
                     if shouldFocusTimerTab {
@@ -2479,7 +2520,8 @@ struct ContentView: View {
          vm.isPerAppVolumePopoverActive ||
          vm.isCaffeinatePopoverActive ||
          vm.isMediaOutputPopoverActive ||
-         vm.isReminderPopoverActive
+         vm.isReminderPopoverActive ||
+         vm.isUSBDevicesPopoverActive
     }
 
     private func shouldPreventAutoClose() -> Bool {

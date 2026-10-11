@@ -158,6 +158,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let dndManager = DoNotDisturbManager.shared  // NEW: DND detection
     let bluetoothAudioManager = BluetoothAudioManager.shared  // NEW: Bluetooth audio detection
     let networkConnectivityManager = NetworkConnectivityManager.shared
+    let usbDeviceManager = USBDeviceManager.shared
     let idleAnimationManager = IdleAnimationManager.shared  // NEW: Custom idle animations
     let downloadManager = DownloadManager.shared  // NEW: browser downloads detection
     let lockScreenPanelManager = LockScreenPanelManager.shared  // NEW: Lock screen music panel
@@ -346,6 +347,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         extensionXPCServiceHost.stop()
         extensionRPCServer.stop()
         networkConnectivityManager.stopMonitoring()
+        usbDeviceManager.stopMonitoring()
         
         // Stop AudioTap capture
         AudioTap.shared.stopCapture()
@@ -545,6 +547,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        if USBConnectionHUDMetrics.isPresented(
+            state: usbDeviceManager.hudState,
+            notchState: vm.notchState,
+            hideOnClosed: vm.hideOnClosed,
+            isLocked: LockScreenManager.shared.isLocked
+        ),
+           let usbSize = USBConnectionHUDMetrics.size(
+               for: usbDeviceManager.hudState,
+               closedNotchSize: vm.closedNotchSize,
+               effectiveClosedNotchHeight: vm.effectiveClosedNotchHeight
+           ) {
+            return addShadowPadding(
+                to: usbSize,
+                isMinimalistic: Defaults[.enableMinimalisticUI]
+            )
+        }
+
         // Check if inline sneak peek is showing and notch is closed
         let airPodsListeningModeSneakActive = vm.notchState == .closed &&
                                       coordinator.sneakPeek.show &&
@@ -621,8 +640,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else if coordinator.currentView == .notes {
             let preferredHeight = coordinator.notesLayoutState.preferredHeight
             baseSize.height = max(baseSize.height, preferredHeight)
-        } else if coordinator.currentView == .clipboard {
-            // Clipboard has its own fixed height source; don't inherit the notes layout state.
+        } else if coordinator.currentView == .clipboard || coordinator.currentView == .usbDevices {
+            // Clipboard and USB devices have their own fixed height source; don't inherit the notes layout state.
             baseSize.height = max(baseSize.height, NotesLayoutState.list.preferredHeight)
         } else if coordinator.currentView == .terminal {
             let screenHeight = NSScreen.main?.visibleFrame.height ?? 800
@@ -843,6 +862,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if !AppRuntimeEnvironment.isUITesting {
             PrivacyIndicatorManager.shared.startMonitoring()
             networkConnectivityManager.startMonitoring()
+            usbDeviceManager.startMonitoring()
         }
         
         // Setup Real-time Audio Waveform capture if enabled
@@ -883,6 +903,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 // @Published emits before assigning the new state, so calculate
                 // the target dimensions on the next main-run-loop turn.
+                DispatchQueue.main.async {
+                    self?.updateWindowSizeIfNeeded()
+                }
+            }
+            .store(in: &cancellables)
+
+        usbDeviceManager.$hudState
+            .removeDuplicates()
+            .sink { [weak self] _ in
                 DispatchQueue.main.async {
                     self?.updateWindowSizeIfNeeded()
                 }

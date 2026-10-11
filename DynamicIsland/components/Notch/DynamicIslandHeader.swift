@@ -29,11 +29,13 @@ struct DynamicIslandHeader: View {
     @ObservedObject var timerManager = TimerManager.shared
     @ObservedObject var doNotDisturbManager = DoNotDisturbManager.shared
     @ObservedObject var caffeinateManager = CaffeinateManager.shared
+    @ObservedObject var usbDeviceManager = USBDeviceManager.shared
     @State private var showClipboardPopover = false
     @State private var showColorPickerPopover = false
     @State private var showTimerPopover = false
     @State private var showPerAppVolumePopover = false
     @State private var showCaffeinatePopover = false
+    @State private var showUSBDevicesPopover = false
     @Default(.enableTimerFeature) var enableTimerFeature
     @Default(.timerDisplayMode) var timerDisplayMode
     @Default(.showClipboardIcon) var showClipboardIcon
@@ -42,6 +44,9 @@ struct DynamicIslandHeader: View {
     @Default(.showPerAppVolumeIcon) var showPerAppVolumeIcon
     @Default(.enableCaffeinate) var enableCaffeinate
     @Default(.showCaffeinateIcon) var showCaffeinateIcon
+    @Default(.enableUSBDeviceFeature) var enableUSBDeviceFeature
+    @Default(.showUSBDevicesIcon) var showUSBDevicesIcon
+    @Default(.usbDisplayMode) var usbDisplayMode
     @Default(.clipboardDisplayMode) var clipboardDisplayMode
     @Default(.showBatteryIndicator) var showBatteryIndicator
     @Default(.showBatteryPercentInside) var showBatteryPercentInside
@@ -68,7 +73,8 @@ struct DynamicIslandHeader: View {
         // ink height -- they are the row default, nudged down because the cup
         // glyph carries a saucer and so reads a shade wider than `timer`.
         "cup.and.saucer": 14.0,
-        "cup.and.saucer.fill": 14.0
+        "cup.and.saucer.fill": 14.0,
+        "cable.connector.horizontal": 13.8
     ]
 
     /// One glyph in the header row, on a common centre.
@@ -304,6 +310,37 @@ struct DynamicIslandHeader: View {
                         }
                     }
 
+                    if enableUSBDeviceFeature && showUSBDevicesIcon && usbDisplayMode == .popover {
+                        Button(action: {
+                            withAnimation(.smooth) {
+                                showUSBDevicesPopover.toggle()
+                            }
+                        }) {
+                            Capsule()
+                                .fill(.black)
+                                .frame(width: 30, height: 30)
+                                .overlay {
+                                    headerGlyph(
+                                        "cable.connector.horizontal",
+                                        color: usbDeviceManager.displayedDevices.isEmpty ? .white : .cyan
+                                    )
+                                }
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                        .popover(isPresented: $showUSBDevicesPopover, arrowEdge: .bottom) {
+                            USBDevicesPopover()
+                        }
+                        .onChange(of: showUSBDevicesPopover) { isActive in
+                            vm.isUSBDevicesPopoverActive = isActive
+
+                            if !isActive {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    vm.shouldRecheckHover.toggle()
+                                }
+                            }
+                        }
+                    }
+
                     if Defaults[.settingsIconInNotch] {
                         Button(action: {
                             SettingsWindowController.shared.showWindow()
@@ -429,6 +466,18 @@ struct DynamicIslandHeader: View {
             if mode == .tab {
                 showTimerPopover = false
                 vm.isTimerPopoverActive = false
+            }
+        }
+        .onChange(of: enableUSBDeviceFeature) { _, newValue in
+            if !newValue {
+                showUSBDevicesPopover = false
+                vm.isUSBDevicesPopoverActive = false
+            }
+        }
+        .onChange(of: usbDisplayMode) { _, mode in
+            if mode == .tab {
+                showUSBDevicesPopover = false
+                vm.isUSBDevicesPopoverActive = false
             }
         }
     }
