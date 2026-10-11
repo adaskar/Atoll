@@ -1434,6 +1434,13 @@ class MusicManager: ObservableObject {
             debounceIdleTask?.cancel()
         } else {
             debounceIdleTask?.cancel()
+            let isDedicatedMusicApp = isAppleMusicActive || isSpotifyActive || bundleIdentifier == "com.tidal.desktop" || bundleIdentifier == "com.amazon.music"
+            if !hasActiveSession || songTitle.isEmpty || !isDedicatedMusicApp {
+                withAnimation {
+                    self.isPlayerIdle = true
+                }
+                return
+            }
             debounceIdleTask = Task { [weak self] in
                 guard let self = self else { return }
                 try? await Task.sleep(for: .seconds(Defaults[.waitInterval]))

@@ -10,6 +10,8 @@ use DynaLoader;
 use File::Spec;
 use File::Basename;
 
+$| = 1;
+
 sub print_help() {
   print <<'HELP';
 Usage:
@@ -100,6 +102,8 @@ my $handle = DynaLoader::dl_load_file($framework, 0)
 my $function_name = shift @ARGV or fail "Missing function name";
 fail "Invalid function name: '$function_name'"
   unless $function_name eq "stream"
+  || $function_name eq "watch"
+  || $function_name eq "watch_all"
   || $function_name eq "get"
   || $function_name eq "send"
   || $function_name eq "seek"
@@ -238,6 +242,12 @@ elsif ($function_name eq "speed") {
 }
 elsif ($function_name eq "test") {
   $symbol_name = "_adapter_is_it_broken_yet";
+}
+elsif ($function_name eq "watch") {
+  $symbol_name = "vorssaint_now_playing_watch";
+}
+elsif ($function_name eq "watch_all") {
+  $symbol_name = "vorssaint_now_playing_watch_all";
 }
 
 if (defined shift @ARGV) {

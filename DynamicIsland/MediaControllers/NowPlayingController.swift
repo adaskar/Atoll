@@ -61,6 +61,13 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     private var process: Process?
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
+    private var stdinPipe: Pipe?
+
+    private func sendCommandToAdapter(_ command: String) {
+        guard let data = "\(command)\n".data(using: .utf8),
+              let pipe = stdinPipe else { return }
+        try? pipe.fileHandleForWriting.write(contentsOf: data)
+    }
 
     // MARK: - Initialization
     init?() {
@@ -95,6 +102,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     deinit {
         streamTask?.cancel()
         
+        try? self.stdinPipe?.fileHandleForWriting.close()
+        self.stdinPipe = nil
+
         if let pipeHandler = self.pipeHandler {
             Task { await pipeHandler.close()
             }
@@ -113,26 +123,32 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 
     // MARK: - Protocol Implementation
     func play() async {
+        sendCommandToAdapter("toggle")
         MRMediaRemoteSendCommandFunction(0, nil)
     }
 
     func pause() async {
+        sendCommandToAdapter("toggle")
         MRMediaRemoteSendCommandFunction(1, nil)
     }
 
     func togglePlay() async {
+        sendCommandToAdapter("toggle")
         MRMediaRemoteSendCommandFunction(2, nil)
     }
 
     func nextTrack() async {
+        sendCommandToAdapter("next")
         MRMediaRemoteSendCommandFunction(4, nil)
     }
 
     func previousTrack() async {
+        sendCommandToAdapter("previous")
         MRMediaRemoteSendCommandFunction(5, nil)
     }
 
     func seek(to time: Double) async {
+        sendCommandToAdapter("seek \(time)")
         MRMediaRemoteSetElapsedTimeFunction(time)
     }
 
@@ -279,6 +295,10 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()
+
+        let stdinPipe = Pipe()
+        process.standardInput = stdinPipe
+        self.stdinPipe = stdinPipe
 
         // Capture stderr so framework/script errors are logged
         let stderrPipe = Pipe()
@@ -454,6 +474,25 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
 struct NowPlayingUpdate: Codable {
     let payload: NowPlayingPayload
     let diff: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case payload, diff
+    }
+
+    init(payload: NowPlayingPayload, diff: Bool?) {
+        self.payload = payload
+        self.diff = diff
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.diff = try container.decodeIfPresent(Bool.self, forKey: .diff)
+        if container.contains(.payload), !(try container.decodeNil(forKey: .payload)) {
+            self.payload = try container.decode(NowPlayingPayload.self, forKey: .payload)
+        } else {
+            self.payload = try NowPlayingPayload(from: decoder)
+        }
+    }
 }
 
 struct NowPlayingPayload: Codable {
@@ -478,13 +517,6 @@ struct NowPlayingPayload: Codable {
     let bundleIdentifier: String?
 
     /// Whether the update names a position field and sets it to null.
-    ///
-    /// A diff omits what has not changed, so an absent position means "carry the
-    /// last one forward". A position that is present but null is the sender
-    /// saying it no longer has one. Optional decoding renders both as nil, so
-    /// the distinction has to be captured while the container is still in hand
-    /// -- otherwise a cleared position is mistaken for an unchanged one and the
-    /// old position keeps being extrapolated from.
     let clearsElapsedTime: Bool
 
     private enum CodingKeys: String, CodingKey {
@@ -495,27 +527,49 @@ struct NowPlayingPayload: Codable {
         case parentApplicationBundleIdentifier, bundleIdentifier
     }
 
+    private enum FallbackCodingKeys: String, CodingKey {
+        case isPlaying
+        case displayID
+        case artworkBase64
+        case kMRMediaRemoteNowPlayingInfoTitle
+        case kMRMediaRemoteNowPlayingInfoArtist
+        case kMRMediaRemoteNowPlayingInfoAlbum
+        case kMRMediaRemoteNowPlayingInfoDuration
+        case kMRMediaRemoteNowPlayingInfoElapsedTime
+        case kMRMediaRemoteNowPlayingInfoPlaybackRate
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let fallback = try decoder.container(keyedBy: FallbackCodingKeys.self)
 
         title = try container.decodeIfPresent(String.self, forKey: .title)
+            ?? fallback.decodeIfPresent(String.self, forKey: .kMRMediaRemoteNowPlayingInfoTitle)
         artist = try container.decodeIfPresent(String.self, forKey: .artist)
+            ?? fallback.decodeIfPresent(String.self, forKey: .kMRMediaRemoteNowPlayingInfoArtist)
         album = try container.decodeIfPresent(String.self, forKey: .album)
+            ?? fallback.decodeIfPresent(String.self, forKey: .kMRMediaRemoteNowPlayingInfoAlbum)
         duration = try container.decodeIfPresent(Double.self, forKey: .duration)
+            ?? fallback.decodeIfPresent(Double.self, forKey: .kMRMediaRemoteNowPlayingInfoDuration)
         elapsedTime = try container.decodeIfPresent(Double.self, forKey: .elapsedTime)
+            ?? fallback.decodeIfPresent(Double.self, forKey: .kMRMediaRemoteNowPlayingInfoElapsedTime)
         durationMicros = try container.decodeIfPresent(Double.self, forKey: .durationMicros)
         elapsedTimeMicros = try container.decodeIfPresent(Double.self, forKey: .elapsedTimeMicros)
         timestampEpochMicros = try container.decodeIfPresent(Double.self, forKey: .timestampEpochMicros)
         shuffleMode = try container.decodeIfPresent(Int.self, forKey: .shuffleMode)
         repeatMode = try container.decodeIfPresent(Int.self, forKey: .repeatMode)
         artworkData = try container.decodeIfPresent(String.self, forKey: .artworkData)
+            ?? fallback.decodeIfPresent(String.self, forKey: .artworkBase64)
         timestamp = try container.decodeIfPresent(String.self, forKey: .timestamp)
         playbackRate = try container.decodeIfPresent(Double.self, forKey: .playbackRate)
+            ?? fallback.decodeIfPresent(Double.self, forKey: .kMRMediaRemoteNowPlayingInfoPlaybackRate)
         playing = try container.decodeIfPresent(Bool.self, forKey: .playing)
+            ?? fallback.decodeIfPresent(Bool.self, forKey: .isPlaying)
         parentApplicationBundleIdentifier = try container.decodeIfPresent(
             String.self, forKey: .parentApplicationBundleIdentifier
-        )
+        ) ?? fallback.decodeIfPresent(String.self, forKey: .displayID)
         bundleIdentifier = try container.decodeIfPresent(String.self, forKey: .bundleIdentifier)
+            ?? fallback.decodeIfPresent(String.self, forKey: .displayID)
 
         func isExplicitlyNull(_ key: CodingKeys) throws -> Bool {
             try container.contains(key) && container.decodeNil(forKey: key)
