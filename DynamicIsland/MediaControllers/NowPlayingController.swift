@@ -62,6 +62,9 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
     private var stdinPipe: Pipe?
+    private var isStopped = false
+    private var restartTask: Task<Void, Never>?
+    private var restartAttempt = 0
     private var lastCommandTransitionAt: Date = .distantPast
     private var deferredEmptyUpdateTask: Task<Void, Never>?
     private static let commandTransitionGracePeriod: TimeInterval = 1.5
@@ -116,6 +119,8 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
     }
 
     deinit {
+        isStopped = true
+        restartTask?.cancel()
         streamTask?.cancel()
         deferredEmptyUpdateTask?.cancel()
         
@@ -128,6 +133,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         }
         
         if let process = self.process {
+            process.terminationHandler = nil
             if process.isRunning {
                 process.terminate()
                 process.waitUntilExit()
@@ -276,9 +282,12 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             return
         }
 
-        // MRMediaRemoteSendCommandFunction(6, nil)
-        MRMediaRemoteSetShuffleModeFunction(playbackState.isShuffled ? 1 : 3)
-        playbackState.isShuffled.toggle()
+        let targetMode = playbackState.isShuffled ? 1 : 3
+        markCommandTransition()
+        if !sendCommandToAdapter("shuffle \(targetMode)") {
+            MRMediaRemoteSetShuffleModeFunction(targetMode)
+        }
+        await MainActor.run { playbackState.isShuffled.toggle() }
     }
     
     func toggleRepeat() async {
@@ -297,14 +306,19 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             return
         }
 
-        // MRMediaRemoteSendCommandFunction(7, nil)
         let newRepeatMode = (playbackState.repeatMode == .off) ? 3 : (playbackState.repeatMode.rawValue - 1)
-        playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
-        MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
+        markCommandTransition()
+        if !sendCommandToAdapter("repeat \(newRepeatMode)") {
+            MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
+        }
+        await MainActor.run {
+            playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
+        }
     }
     
     // MARK: - Setup Methods
     private func setupNowPlayingObserver() async {
+        guard !isStopped else { return }
         let process = Process()
         guard
             let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
@@ -346,6 +360,12 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             print("NowPlayingController [stderr]: \(message)")
         }
         
+        process.terminationHandler = { [weak self] proc in
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            guard let self, !self.isStopped else { return }
+            self.scheduleAdapterRestart()
+        }
+
         self.process = process
         self.pipeHandler = pipeHandler
 
@@ -359,11 +379,25 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
         }
     }
 
+    private func scheduleAdapterRestart() {
+        guard !isStopped else { return }
+        restartTask?.cancel()
+        let attempt = restartAttempt
+        restartAttempt = min(restartAttempt + 1, 5)
+        let delaySeconds = attempt == 0 ? 0.25 : min(pow(2.0, Double(attempt - 1)), 30.0)
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delaySeconds))
+            guard !Task.isCancelled, let self, !self.isStopped else { return }
+            await self.setupNowPlayingObserver()
+        }
+    }
+
     // MARK: - Async Stream Processing
     private func processJSONStream() async {
         guard let pipeHandler = self.pipeHandler else { return }
         
         await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+            self?.restartAttempt = 0
             await self?.handleAdapterUpdate(update)
         }
     }
@@ -670,10 +704,31 @@ actor JSONLinesPipeHandler {
     private let pipe: Pipe
     private let fileHandle: FileHandle
     private var buffer = ""
+    private let decoder = JSONDecoder()
+    private let dataStream: AsyncStream<Data>
+    private let streamContinuation: AsyncStream<Data>.Continuation
     
     init() {
-        self.pipe = Pipe()
-        self.fileHandle = pipe.fileHandleForReading
+        let pipe = Pipe()
+        let fileHandle = pipe.fileHandleForReading
+        self.pipe = pipe
+        self.fileHandle = fileHandle
+        
+        var continuation: AsyncStream<Data>.Continuation!
+        self.dataStream = AsyncStream { cont in
+            continuation = cont
+        }
+        self.streamContinuation = continuation
+        
+        fileHandle.readabilityHandler = { [continuation] handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                continuation?.finish()
+            } else {
+                continuation?.yield(data)
+            }
+        }
     }
     
     func getPipe() -> Pipe {
@@ -681,26 +736,14 @@ actor JSONLinesPipeHandler {
     }
     
     func readJSONLines<T: Decodable>(as type: T.Type, onLine: @escaping (T) async -> Void) async {
-        do {
-            try await self.processLines(as: type) { decodedObject in
-                await onLine(decodedObject)
-            }
-        } catch {
-            print("Error processing JSON stream: \(error)")
-        }
-    }
-    
-    private func processLines<T: Decodable>(as type: T.Type, onLine: @escaping (T) async -> Void) async throws {
-        while true {
-            let data = try await readData()
-            guard !data.isEmpty else { break }
-            
+        for await data in dataStream {
+            guard !Task.isCancelled else { break }
             if let chunk = String(data: data, encoding: .utf8) {
                 buffer.append(chunk)
                 
                 while let range = buffer.range(of: "\n") {
                     let line = String(buffer[..<range.lowerBound])
-                    buffer = String(buffer[range.upperBound...])
+                    buffer.removeSubrange(..<range.upperBound)
                     
                     if !line.isEmpty {
                         await processJSONLine(line, as: type, onLine: onLine)
@@ -714,32 +757,15 @@ actor JSONLinesPipeHandler {
         guard let data = line.data(using: .utf8) else {
             return
         }
-        do {
-            let decodedObject = try JSONDecoder().decode(T.self, from: data)
+        if let decodedObject = try? decoder.decode(T.self, from: data) {
             await onLine(decodedObject)
-        } catch {
-            // Ignore lines that can't be decoded
-        }
-    }
-    
-    private func readData() async throws -> Data {
-        return try await withCheckedThrowingContinuation { continuation in
-            
-            fileHandle.readabilityHandler = { handle in
-                let data = handle.availableData
-                handle.readabilityHandler = nil
-                continuation.resume(returning: data)
-            }
         }
     }
     
     func close() async {
-        do {
-            fileHandle.readabilityHandler = nil
-            try fileHandle.close()
-            try pipe.fileHandleForWriting.close()
-        } catch {
-            print("Error closing pipe handler: \(error)")
-        }
+        fileHandle.readabilityHandler = nil
+        streamContinuation.finish()
+        try? fileHandle.close()
+        try? pipe.fileHandleForWriting.close()
     }
 }

@@ -106,4 +106,33 @@ final class NowPlayingPayloadTests: XCTestCase {
 
         XCTAssertFalse(MusicManager.isLikelyAdvertisement(state))
     }
+
+    func testJSONLinesPipeHandlerStreamsMultipleLines() async throws {
+        let handler = JSONLinesPipeHandler()
+        let pipe = await handler.getPipe()
+
+        var receivedTitles: [String] = []
+        let expectation = XCTestExpectation(description: "Read two JSON lines")
+
+        let readTask = Task {
+            await handler.readJSONLines(as: NowPlayingUpdate.self) { update in
+                if let title = update.payload.title {
+                    receivedTitles.append(title)
+                    if receivedTitles.count == 2 {
+                        expectation.fulfill()
+                    }
+                }
+            }
+        }
+
+        let payload1 = #"{"payload":{"title":"Track 1"},"diff":false}"# + "\n"
+        let payload2 = #"{"payload":{"title":"Track 2"},"diff":true}"# + "\n"
+        try pipe.fileHandleForWriting.write(contentsOf: Data((payload1 + payload2).utf8))
+
+        await fulfillment(of: [expectation], timeout: 2.0)
+        await handler.close()
+        readTask.cancel()
+
+        XCTAssertEqual(receivedTitles, ["Track 1", "Track 2"])
+    }
 }

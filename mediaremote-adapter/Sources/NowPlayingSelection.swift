@@ -27,7 +27,7 @@ enum NotchNativePlayback {
         }
     }
 
-    private static let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    static let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
     private static let callbacks = DispatchQueue(label: "com.vorssaint.now-playing-selection-callbacks")
     private static let lock = NSLock()
     private static var selected: Target?

@@ -146,7 +146,7 @@ func emit(_ reply: [String: Any]) {
 /// Entry point called from perl. Prints exactly one line and returns.
 @_cdecl("vorssaint_now_playing_get")
 public func vorssaintNowPlayingGet() {
-    let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    let handle = NotchNativePlayback.handle
     guard let getInfo = function(handle, "MRMediaRemoteGetNowPlayingInfo", as: InfoFunction.self) else {
         emit(["error": "MRMediaRemoteGetNowPlayingInfo unavailable"])
         return
@@ -334,7 +334,7 @@ public func vorssaintNowPlayingWatchAll() {
 @_cdecl("vorssaint_now_playing_watch")
 public func vorssaintNowPlayingWatch() {
     typealias Register = @convention(c) (DispatchQueue) -> Void
-    let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    let handle = NotchNativePlayback.handle
     guard let register = function(handle, "MRMediaRemoteRegisterForNowPlayingNotifications", as: Register.self) else {
         emit(["error": "notifications unavailable"])
         return
@@ -447,6 +447,7 @@ public func vorssaintNowPlayingWatch() {
 
 private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     let command = request.command
+    let handle = NotchNativePlayback.handle
     switch command {
     case .source(let selection):
         NotchNativeQueue.configure(nil)
@@ -458,6 +459,20 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     case .queue(let request): NotchNativeQueue.configure(request); return
     case .queueStop: NotchNativeQueue.configure(nil); return
     case .queuePlay(let selected): NotchNativeQueue.play(selected); return
+    case .shuffle(let mode):
+        NotchNativePlayback.noteCommandSent()
+        typealias SetShuffle = @convention(c) (Int) -> Void
+        if let setShuffle = function(handle, "MRMediaRemoteSetShuffleMode", as: SetShuffle.self) {
+            setShuffle(mode)
+        }
+        return
+    case .repeatMode(let mode):
+        NotchNativePlayback.noteCommandSent()
+        typealias SetRepeat = @convention(c) (Int) -> Void
+        if let setRepeat = function(handle, "MRMediaRemoteSetRepeatMode", as: SetRepeat.self) {
+            setRepeat(mode)
+        }
+        return
     default: break
     }
     NotchNativePlayback.noteCommandSent()
@@ -475,14 +490,13 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
         if let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") {
             options = [key: position] as CFDictionary
         }
-    case .queue, .queueStop, .queuePlay, .validate, .source: return
+    case .queue, .queueStop, .queuePlay, .validate, .source, .shuffle, .repeatMode: return
     }
     var didSend = false
     if let target {
         didSend = NotchNativePlayback.send(identifier, options: options, to: target)
     }
     if !didSend {
-        let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
         typealias SendCmd = @convention(c) (Int32, AnyObject?) -> Bool
         if let send = function(handle, "MRMediaRemoteSendCommand", as: SendCmd.self) {
             _ = send(identifier, options)
@@ -528,7 +542,7 @@ public func adapterSendEnv() {
     if let cmdStr = ProcessInfo.processInfo.environment["MEDIAREMOTEADAPTER_PARAM_adapter_send_0_command"],
        let cmdID = Int32(cmdStr) {
         typealias Send = @convention(c) (Int32, CFDictionary?) -> Bool
-        let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+        let handle = NotchNativePlayback.handle
         if let send = function(handle, "MRMediaRemoteSendCommand", as: Send.self) {
             _ = send(cmdID, nil)
         }
@@ -546,7 +560,7 @@ public func adapterSeekEnv() {
        let posMicros = Double(posStr) {
         let posSecs = posMicros / 1_000_000.0
         typealias Send = @convention(c) (Int32, CFDictionary?) -> Bool
-        let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+        let handle = NotchNativePlayback.handle
         if let send = function(handle, "MRMediaRemoteSendCommand", as: Send.self),
            let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") {
             _ = send(24, [key: posSecs] as CFDictionary)
@@ -560,16 +574,36 @@ public func adapterSeek() {
 }
 
 @_cdecl("adapter_shuffle_env")
-public func adapterShuffleEnv() {}
+public func adapterShuffleEnv() {
+    if let modeStr = ProcessInfo.processInfo.environment["MEDIAREMOTEADAPTER_PARAM_adapter_shuffle_0_mode"],
+       let mode = Int(modeStr) {
+        typealias SetShuffle = @convention(c) (Int) -> Void
+        if let setShuffle = function(NotchNativePlayback.handle, "MRMediaRemoteSetShuffleMode", as: SetShuffle.self) {
+            setShuffle(mode)
+        }
+    }
+}
 
 @_cdecl("adapter_shuffle")
-public func adapterShuffle() {}
+public func adapterShuffle() {
+    adapterShuffleEnv()
+}
 
 @_cdecl("adapter_repeat_env")
-public func adapterRepeatEnv() {}
+public func adapterRepeatEnv() {
+    if let modeStr = ProcessInfo.processInfo.environment["MEDIAREMOTEADAPTER_PARAM_adapter_repeat_0_mode"],
+       let mode = Int(modeStr) {
+        typealias SetRepeat = @convention(c) (Int) -> Void
+        if let setRepeat = function(NotchNativePlayback.handle, "MRMediaRemoteSetRepeatMode", as: SetRepeat.self) {
+            setRepeat(mode)
+        }
+    }
+}
 
 @_cdecl("adapter_repeat")
-public func adapterRepeat() {}
+public func adapterRepeat() {
+    adapterRepeatEnv()
+}
 
 @_cdecl("adapter_speed_env")
 public func adapterSpeedEnv() {}

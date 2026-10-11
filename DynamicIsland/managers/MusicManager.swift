@@ -1086,7 +1086,9 @@ class MusicManager: ObservableObject {
         
         updateLiveStreamState(with: state)
         self.refreshLikedFlag(for: state)
-        self.refreshTidalPlaybackModes(for: state)
+        if hasContentChange || eventIsPlaying != self.isPlaying {
+            self.refreshTidalPlaybackModes(for: state, force: true)
+        }
 
         // Guarded like every other assignment in this method, and for the same
         // reason. This is a published property that several views read, so an
@@ -1104,10 +1106,13 @@ class MusicManager: ObservableObject {
         }
 
         // Manage lyric sync task based on playback/lyrics availability
-        if Defaults[.enableLyrics] && !self.syncedLyrics.isEmpty {
-            // Ensure syncing runs while lyrics are enabled
+        if Defaults[.enableLyrics] && !self.syncedLyrics.isEmpty && self.isPlaying {
+            // Ensure syncing runs while lyrics are enabled and actively playing
             startLyricSync()
         } else {
+            if Defaults[.enableLyrics] && !self.syncedLyrics.isEmpty {
+                updateCurrentLyric(for: lyricPlaybackPosition())
+            }
             stopLyricSync()
         }
     }
@@ -1118,12 +1123,12 @@ class MusicManager: ObservableObject {
     /// means reading TIDAL's menu, so it is paced rather than done on every
     /// delivery.
     @MainActor
-    private func refreshTidalPlaybackModes(for state: PlaybackState) {
+    private func refreshTidalPlaybackModes(for state: PlaybackState, force: Bool = false) {
         guard state.bundleIdentifier == TidalAccessibility.bundleIdentifier,
               TidalAccessibility.isAvailable else { return }
 
         let now = Date()
-        guard now.timeIntervalSince(lastTidalModeRefresh) >= Self.tidalModeRefreshInterval else {
+        guard force || now.timeIntervalSince(lastTidalModeRefresh) >= Self.tidalModeRefreshInterval else {
             return
         }
         lastTidalModeRefresh = now
@@ -2014,7 +2019,7 @@ class MusicManager: ObservableObject {
 
         updateCurrentLyric(for: lyricPlaybackPosition())
 
-        if Defaults[.enableLyrics] {
+        if Defaults[.enableLyrics] && isPlaying {
             startLyricSync()
         } else {
             stopLyricSync()
@@ -2064,15 +2069,9 @@ class MusicManager: ObservableObject {
 
     // Start a background task that periodically updates the displayed lyric
     private func startLyricSync() {
-        // Nothing to follow when the lyrics carry no timings; the loop would
-        // wake repeatedly only to conclude there is no line to point at.
-        //
-        // Asked before the "already running" return, not after it: a refetch
-        // on the same track can replace timed lyrics with untimed ones while
-        // the previous loop is still alive, and that loop would otherwise go
-        // on waking at its maximum rate for the rest of the track, finding
-        // nothing to point at each time.
-        guard hasTimedLyrics else {
+        // Nothing to follow when the lyrics carry no timings or playback is paused;
+        // the loop would wake repeatedly only to conclude nothing moved.
+        guard hasTimedLyrics && isPlaying else {
             stopLyricSync()
             return
         }
@@ -2085,9 +2084,14 @@ class MusicManager: ObservableObject {
                 // Compute estimated playback position and update lyric
                 let position = self.lyricPlaybackPosition()
                 let delay = await MainActor.run { () -> TimeInterval in
+                    guard self.isPlaying else {
+                        self.stopLyricSync()
+                        return 0
+                    }
                     self.updateCurrentLyric(for: position)
                     return self.delayUntilNextLyric(after: position)
                 }
+                guard delay > 0 && !Task.isCancelled else { break }
 
                 try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }

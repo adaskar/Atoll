@@ -22,7 +22,7 @@ enum NotchNativeQueue {
     private static var refreshPending = false
     private static var refreshGeneration = UUID()
     private static var observer: NSObjectProtocol?
-    private static let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
+    private static var handle: UnsafeMutableRawPointer? { NotchNativePlayback.handle }
 
     private struct Identity: Equatable {
         let pid: Int32

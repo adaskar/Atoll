@@ -47,6 +47,7 @@ struct NotchQueueSelection: Equatable {
 enum NotchPlaybackCommand: Equatable {
     case toggle, play, pause, next, previous
     case seek(Double)
+    case shuffle(Int), repeatMode(Int)
     case queue(UUID), queueStop, queuePlay(NotchQueueSelection)
     case validate(UUID, NotchPlaybackContext)
     case source(NotchPlaybackSource.Selection?)
@@ -64,6 +65,12 @@ enum NotchPlaybackCommand: Equatable {
         case "source-auto": self = .source(nil)
         default:
             let parts = message.split(separator: " ", omittingEmptySubsequences: false)
+            if parts.count == 2, parts[0] == "shuffle", let mode = Int(parts[1]) {
+                self = .shuffle(mode); return
+            }
+            if parts.count == 2, parts[0] == "repeat", let mode = Int(parts[1]) {
+                self = .repeatMode(mode); return
+            }
             if parts.count == 3, parts[0] == "source", let pid = Int32(parts[1]),
                let data = Data(base64Encoded: String(parts[2])), let bundle = String(data: data, encoding: .utf8) {
                 let selection = NotchPlaybackSource.Selection(pid: pid, bundleIdentifier: bundle)
@@ -102,7 +109,7 @@ enum NotchPlaybackCommand: Equatable {
 
     var requiresPlaybackContext: Bool {
         switch self {
-        case .toggle, .play, .pause, .next, .previous, .seek: return true
+        case .toggle, .play, .pause, .next, .previous, .seek, .shuffle, .repeatMode: return true
         case .queue, .queueStop, .queuePlay, .validate, .source: return false
         }
     }
@@ -114,6 +121,8 @@ enum NotchPlaybackCommand: Equatable {
         case .pause: return "pause"
         case .next: return "next"
         case .previous: return "previous"
+        case .shuffle(let mode): return "shuffle \(mode)"
+        case .repeatMode(let mode): return "repeat \(mode)"
         case .queue(let id): return "queue \(id.uuidString)"
         case .queueStop: return "queue-stop"
         case .source(nil): return "source-auto"

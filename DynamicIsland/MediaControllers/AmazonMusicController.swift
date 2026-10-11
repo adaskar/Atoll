@@ -49,8 +49,25 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
     private var process: Process?
     private var pipeHandler: JSONLinesPipeHandler?
     private var streamTask: Task<Void, Never>?
+    private var stdinPipe: Pipe?
+    private var isStopped = false
+    private var restartTask: Task<Void, Never>?
+    private var restartAttempt = 0
     private let targetBundleIdentifier: String
     private let controllerName: String
+
+    @discardableResult
+    private func sendCommandToAdapter(_ command: String) -> Bool {
+        guard process?.isRunning == true,
+              let data = "\(command)\n".data(using: .utf8),
+              let pipe = stdinPipe else { return false }
+        do {
+            try pipe.fileHandleForWriting.write(contentsOf: data)
+            return true
+        } catch {
+            return false
+        }
+    }
 
     /// True only after a stream line explicitly identified the selected app as the now playing source.
     private var targetSessionActive = false
@@ -92,13 +109,19 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
     }
 
     deinit {
+        isStopped = true
+        restartTask?.cancel()
         streamTask?.cancel()
+
+        try? self.stdinPipe?.fileHandleForWriting.close()
+        self.stdinPipe = nil
 
         if let pipeHandler = self.pipeHandler {
             Task { await pipeHandler.close() }
         }
 
         if let process = self.process {
+            process.terminationHandler = nil
             if process.isRunning {
                 process.terminate()
                 process.waitUntilExit()
@@ -110,28 +133,46 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
     }
 
     func play() async {
-        MRMediaRemoteSendCommandFunction(0, nil)
+        if !sendCommandToAdapter("play") {
+            MRMediaRemoteSendCommandFunction(0, nil)
+        }
     }
 
     func pause() async {
-        MRMediaRemoteSendCommandFunction(1, nil)
+        if !sendCommandToAdapter("pause") {
+            MRMediaRemoteSendCommandFunction(1, nil)
+        }
     }
 
     func togglePlay() async {
-        MRMediaRemoteSendCommandFunction(2, nil)
+        if !sendCommandToAdapter("toggle") {
+            MRMediaRemoteSendCommandFunction(2, nil)
+        }
     }
 
     func nextTrack() async {
-        MRMediaRemoteSendCommandFunction(4, nil)
+        if !sendCommandToAdapter("next") {
+            MRMediaRemoteSendCommandFunction(4, nil)
+        }
     }
 
     func previousTrack() async {
-        MRMediaRemoteSendCommandFunction(5, nil)
+        if !sendCommandToAdapter("previous") {
+            MRMediaRemoteSendCommandFunction(5, nil)
+        }
     }
 
     func seek(to time: Double) async {
         await MainActor.run {
-            MRMediaRemoteSetElapsedTimeFunction(time)
+            var updated = self.playbackState
+            updated.currentTime = time
+            updated.lastUpdated = Date()
+            self.playbackState = updated
+        }
+        if !sendCommandToAdapter("seek \(time)") {
+            await MainActor.run {
+                MRMediaRemoteSetElapsedTimeFunction(time)
+            }
         }
     }
 
@@ -160,8 +201,13 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
     func setCurrentTrackFavorited(_ favorited: Bool) async -> Bool { false }
 
     func toggleShuffle() async {
-        MRMediaRemoteSetShuffleModeFunction(playbackState.isShuffled ? 1 : 3)
-        playbackState.isShuffled.toggle()
+        let targetMode = playbackState.isShuffled ? 1 : 3
+        if !sendCommandToAdapter("shuffle \(targetMode)") {
+            MRMediaRemoteSetShuffleModeFunction(targetMode)
+        }
+        await MainActor.run {
+            playbackState.isShuffled.toggle()
+        }
     }
 
     /// Openings for a subclass whose app reports shuffle and repeat somewhere
@@ -180,11 +226,16 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
 
     func toggleRepeat() async {
         let newRepeatMode = (playbackState.repeatMode == .off) ? 3 : (playbackState.repeatMode.rawValue - 1)
-        playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
-        MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
+        if !sendCommandToAdapter("repeat \(newRepeatMode)") {
+            MRMediaRemoteSetRepeatModeFunction(newRepeatMode)
+        }
+        await MainActor.run {
+            playbackState.repeatMode = RepeatMode(rawValue: newRepeatMode) ?? .off
+        }
     }
 
     private func setupNowPlayingObserver() async {
+        guard !isStopped else { return }
         let process = Process()
         guard
             let scriptURL = Bundle.main.url(forResource: "mediaremote-adapter", withExtension: "pl"),
@@ -203,6 +254,10 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
         let pipeHandler = JSONLinesPipeHandler()
         process.standardOutput = await pipeHandler.getPipe()
 
+        let stdinPipe = Pipe()
+        process.standardInput = stdinPipe
+        self.stdinPipe = stdinPipe
+
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
         let logName = controllerName
@@ -214,6 +269,12 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
                   !message.isEmpty
             else { return }
             print("\(logName) [stderr]: \(message)")
+        }
+
+        process.terminationHandler = { [weak self] _ in
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            guard let self, !self.isStopped else { return }
+            self.scheduleAdapterRestart()
         }
 
         self.process = process
@@ -229,10 +290,24 @@ class FilteredNowPlayingController: ObservableObject, MediaControllerProtocol {
         }
     }
 
+    private func scheduleAdapterRestart() {
+        guard !isStopped else { return }
+        restartTask?.cancel()
+        let attempt = restartAttempt
+        restartAttempt = min(restartAttempt + 1, 5)
+        let delaySeconds = attempt == 0 ? 0.25 : min(pow(2.0, Double(attempt - 1)), 30.0)
+        restartTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delaySeconds))
+            guard !Task.isCancelled, let self, !self.isStopped else { return }
+            await self.setupNowPlayingObserver()
+        }
+    }
+
     private func processJSONStream() async {
         guard let pipeHandler = self.pipeHandler else { return }
 
         await pipeHandler.readJSONLines(as: NowPlayingUpdate.self) { [weak self] update in
+            self?.restartAttempt = 0
             await self?.handleAdapterUpdate(update)
         }
     }
