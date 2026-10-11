@@ -127,6 +127,10 @@ struct OptimisticPlaybackTransition {
         expectedState = nil
         return true
     }
+
+    mutating func reset() {
+        expectedState = nil
+    }
 }
 
 private struct ManualTrackArtworkHandoff {
@@ -973,6 +977,9 @@ class MusicManager: ObservableObject {
 
         // Check for playback state changes (playing/paused)
         let eventIsPlaying = state.isPlaying
+        if !eventIsPlaying && state.title.isEmpty && state.artist.isEmpty {
+            optimisticPlaybackTransition.reset()
+        }
         let expectedState = optimisticPlaybackTransition.expectedState
         let shouldApplyPlaybackEvent = optimisticPlaybackTransition.shouldApply(
             eventIsPlaying: eventIsPlaying

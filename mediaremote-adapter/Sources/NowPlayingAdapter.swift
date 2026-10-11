@@ -10,6 +10,7 @@
 // with DynaLoader and calls adapter entry points.
 
 import AppKit
+import CoreAudio
 import Foundation
 
 private typealias InfoCallback = @convention(block) (NSDictionary?) -> Void
@@ -220,7 +221,11 @@ public func vorssaintNowPlayingGet() {
         set("displayID", selected.applicationBundleIdentifier ?? selected.bundleIdentifier)
         state.enter()
         NotchNativePlayback.readPlaybackState(selected, queue: queue) { isPlaying in
-            set("isPlaying", isPlaying)
+            if selected.resolvedIsPlaying == false {
+                set("isPlaying", false)
+            } else {
+                set("isPlaying", isPlaying ?? selected.resolvedIsPlaying)
+            }
             state.leave()
         }
     } else { getInfo(queue, receiveInfo) }
@@ -358,6 +363,65 @@ public func vorssaintNowPlayingWatch() {
         let delay = max(0, uptime - ProcessInfo.processInfo.systemUptime)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { refresh() }
     }
+    var observedAudioObjects = Set<AudioObjectID>()
+    let audioListenerBlock: AudioObjectPropertyListenerBlock = { _, _ in
+        refresh()
+    }
+    func syncAudioProcessListeners() {
+        var listAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyProcessObjectList,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var listSize: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(
+            AudioObjectID(kAudioObjectSystemObject),
+            &listAddr,
+            0,
+            nil,
+            &listSize
+        ) == noErr, listSize > 0 else { return }
+        let count = Int(listSize) / MemoryLayout<AudioObjectID>.size
+        var objects = [AudioObjectID](repeating: 0, count: count)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &listAddr,
+            0,
+            nil,
+            &listSize,
+            &objects
+        ) == noErr else { return }
+        for obj in objects where observedAudioObjects.insert(obj).inserted {
+            var outAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioProcessPropertyIsRunningOutput,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            _ = AudioObjectAddPropertyListenerBlock(obj, &outAddr, DispatchQueue.main, audioListenerBlock)
+            var runAddr = AudioObjectPropertyAddress(
+                mSelector: kAudioProcessPropertyIsRunning,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            _ = AudioObjectAddPropertyListenerBlock(obj, &runAddr, DispatchQueue.main, audioListenerBlock)
+        }
+    }
+    var processListAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
+        mScope: kAudioObjectPropertyScopeGlobal,
+        mElement: kAudioObjectPropertyElementMain
+    )
+    let processListListener: AudioObjectPropertyListenerBlock = { _, _ in
+        syncAudioProcessListeners()
+        refresh()
+    }
+    _ = AudioObjectAddPropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject),
+        &processListAddr,
+        DispatchQueue.main,
+        processListListener
+    )
+    syncAudioProcessListeners()
     let observers = names.map { name in
         NotificationCenter.default.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in refresh() }
     }
@@ -378,7 +442,7 @@ public func vorssaintNowPlayingWatch() {
         }
     }
     reader.async { vorssaintNowPlayingGet() }
-    withExtendedLifetime((observers, termination)) { RunLoop.main.run() }
+    withExtendedLifetime((observers, termination, audioListenerBlock, processListListener)) { RunLoop.main.run() }
 }
 
 private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
@@ -396,10 +460,10 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     case .queuePlay(let selected): NotchNativeQueue.play(selected); return
     default: break
     }
+    NotchNativePlayback.noteCommandSent()
     let target = request.context.flatMap { NotchNativePlayback.validatedTarget(for: $0) } ?? NotchNativePlayback.target
     let identifier: Int32
     var options: CFDictionary?
-    var seekPosition: Double?
     switch command {
     case .toggle: identifier = target?.playPauseCommand ?? 2
     case .play: identifier = 0
@@ -407,7 +471,6 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     case .next: identifier = 4
     case .previous: identifier = 5
     case .seek(let position):
-        seekPosition = position
         identifier = 24
         if let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") {
             options = [key: position] as CFDictionary
@@ -420,16 +483,9 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     }
     if !didSend {
         let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
-        if let position = seekPosition {
-            typealias SetElapsed = @convention(c) (Double) -> Void
-            if let setElapsed = function(handle, "MRMediaRemoteSetElapsedTime", as: SetElapsed.self) {
-                setElapsed(position)
-            }
-        } else {
-            typealias SendCmd = @convention(c) (Int32, AnyObject?) -> Bool
-            if let send = function(handle, "MRMediaRemoteSendCommand", as: SendCmd.self) {
-                _ = send(identifier, options)
-            }
+        typealias SendCmd = @convention(c) (Int32, AnyObject?) -> Bool
+        if let send = function(handle, "MRMediaRemoteSendCommand", as: SendCmd.self) {
+            _ = send(identifier, options)
         }
     }
 }
@@ -489,10 +545,11 @@ public func adapterSeekEnv() {
     if let posStr = ProcessInfo.processInfo.environment["MEDIAREMOTEADAPTER_PARAM_adapter_seek_0_position"],
        let posMicros = Double(posStr) {
         let posSecs = posMicros / 1_000_000.0
-        typealias SetTime = @convention(c) (Double) -> Void
+        typealias Send = @convention(c) (Int32, CFDictionary?) -> Bool
         let handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY)
-        if let setTime = function(handle, "MRMediaRemoteSetElapsedTime", as: SetTime.self) {
-            setTime(posSecs)
+        if let send = function(handle, "MRMediaRemoteSendCommand", as: Send.self),
+           let key = NotchNativePlayback.stringConstant("kMRMediaRemoteOptionPlaybackPosition") {
+            _ = send(24, [key: posSecs] as CFDictionary)
         }
     }
 }

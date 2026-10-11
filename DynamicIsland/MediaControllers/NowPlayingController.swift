@@ -182,9 +182,7 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             updated.lastUpdated = Date()
             self.playbackState = updated
         }
-        if !sendCommandToAdapter("seek \(time)") {
-            MRMediaRemoteSetElapsedTimeFunction(time)
-        }
+        _ = sendCommandToAdapter("seek \(time)")
     }
 
     func isActive() -> Bool {
