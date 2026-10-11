@@ -2786,13 +2786,11 @@ private struct DevicesSettingsView: View {
                 .disabled(!enableUSBDeviceFeature)
                 .settingsHighlight(id: highlightID("USB Display mode"))
 
-                if usbDisplayMode == .popover {
-                    Defaults.Toggle(key: .showUSBDevicesIcon) {
-                        Text("Show USB icon in the notch")
-                    }
-                    .disabled(!enableUSBDeviceFeature)
-                    .settingsHighlight(id: highlightID("Show USB icon in the notch"))
+                Defaults.Toggle(key: .showUSBDevicesIcon) {
+                    Text("Show USB icon in the notch")
                 }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Show USB icon in the notch"))
 
                 Defaults.Toggle(key: .hideUSBHubsAndInternal) {
                     Text("Hide USB hubs by default")

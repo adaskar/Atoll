@@ -30,16 +30,16 @@ public enum USBDisplayMode: String, CaseIterable, Defaults.Serializable, Identif
         case .popover:
             return String(localized: "Popover")
         case .tab:
-            return String(localized: "Tab")
+            return String(localized: "Notch Tab")
         }
     }
 
     var description: String {
         switch self {
         case .popover:
-            return String(localized: "Shows connected USB devices in a popover from the notch header.")
+            return String(localized: "Shows connected USB devices in a popover attached to the USB button.")
         case .tab:
-            return String(localized: "Shows connected USB devices as a dedicated tab inside the open notch.")
+            return String(localized: "Shows connected USB devices in a dedicated USB tab inside the notch.")
         }
     }
 }

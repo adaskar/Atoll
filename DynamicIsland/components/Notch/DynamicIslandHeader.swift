@@ -310,10 +310,16 @@ struct DynamicIslandHeader: View {
                         }
                     }
 
-                    if enableUSBDeviceFeature && showUSBDevicesIcon && usbDisplayMode == .popover {
+                    if enableUSBDeviceFeature && showUSBDevicesIcon {
                         Button(action: {
-                            withAnimation(.smooth) {
-                                showUSBDevicesPopover.toggle()
+                            switch usbDisplayMode {
+                            case .popover:
+                                withAnimation(.smooth) {
+                                    showUSBDevicesPopover.toggle()
+                                }
+                            case .tab:
+                                AppDelegate.shared?.cancelPendingNotchAutoClose()
+                                coordinator.currentView = (coordinator.currentView == .usbDevices) ? .home : .usbDevices
                             }
                         }) {
                             Capsule()

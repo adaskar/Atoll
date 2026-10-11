@@ -20,9 +20,53 @@ import AppKit
 import Defaults
 import SwiftUI
 
+private struct USBPopoverContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 struct USBDevicesPopover: View {
     @ObservedObject private var manager = USBDeviceManager.shared
     @State private var expandedDeviceIDs: Set<UInt64> = []
+    @State private var measuredListHeight: CGFloat = 0
+
+    private let maxListHeight: CGFloat = 420
+
+    private var estimatedListHeight: CGFloat {
+        let devices = manager.displayedDevices
+        guard !devices.isEmpty else { return 0 }
+
+        var total: CGFloat = 0
+        for (index, device) in devices.enumerated() {
+            if index > 0 {
+                total += 8
+            }
+            // Base row height (title + subtitle + padding)
+            var rowHeight: CGFloat = 56
+            if device.powerSummaryText != nil || device.usbVersion != nil {
+                rowHeight += 26
+            }
+            if !device.mountedVolumes.isEmpty {
+                rowHeight += CGFloat(device.mountedVolumes.count) * 42 + 6
+            }
+            if expandedDeviceIDs.contains(device.id) {
+                var detailLines = 2 // VID:PID + Location ID
+                if device.speed != nil { detailLines += 1 }
+                if device.serialNumber != nil { detailLines += 1 }
+                if device.busPowerMA != nil { detailLines += 1 }
+                rowHeight += CGFloat(detailLines) * 18 + 20
+            }
+            total += rowHeight
+        }
+        return total
+    }
+
+    private var resolvedListHeight: CGFloat {
+        let target = measuredListHeight > 0 ? measuredListHeight : estimatedListHeight
+        return min(max(target, 60), maxListHeight)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -63,8 +107,20 @@ struct USBDevicesPopover: View {
                             )
                         }
                     }
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .preference(key: USBPopoverContentHeightKey.self, value: geo.size.height)
+                        }
+                    )
                 }
-                .frame(maxHeight: 310)
+                .onPreferenceChange(USBPopoverContentHeightKey.self) { newHeight in
+                    if abs(measuredListHeight - newHeight) > 0.5 {
+                        measuredListHeight = newHeight
+                    }
+                }
+                .frame(height: resolvedListHeight)
+                .animation(.smooth(duration: 0.2), value: resolvedListHeight)
             }
         }
         .padding(16)

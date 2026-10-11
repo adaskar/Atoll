@@ -103,12 +103,6 @@ struct USBConnectionHUD: View {
 
         return HStack(spacing: 0) {
             HStack(spacing: 6) {
-                Image(systemName: symbolName)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(accent)
-                    .symbolRenderingMode(.hierarchical)
-                    .contentTransition(.symbolEffect(.replace))
-
                 if extraCount > 0 {
                     Text("+\(extraCount)")
                         .font(.system(size: 10, weight: .bold, design: .rounded))
@@ -117,12 +111,19 @@ struct USBConnectionHUD: View {
                         .padding(.vertical, 1.5)
                         .background(accent.opacity(0.16), in: Capsule())
                 }
+
+                Image(systemName: symbolName)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .symbolRenderingMode(.hierarchical)
+                    .contentTransition(.symbolEffect(.replace))
             }
-            .padding(.leading, 18)
+            .padding(.leading, 14)
+            .padding(.trailing, 14)
             .frame(
                 width: wingWidth,
                 height: closedNotchSize.height,
-                alignment: .leading
+                alignment: .trailing
             )
 
             Color.clear

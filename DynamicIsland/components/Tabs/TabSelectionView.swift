@@ -97,9 +97,6 @@ struct TabSelectionView: View {
         if Defaults[.enableTerminalFeature] {
             tabsArray.append(TabModel(label: "Terminal", icon: "apple.terminal", view: .terminal))
         }
-        if enableUSBDeviceFeature && usbDisplayMode == .tab {
-            tabsArray.append(TabModel(label: "USB", icon: "cable.connector.horizontal", view: .usbDevices))
-        }
         if extensionTabsEnabled {
             for payload in extensionTabPayloads {
                 guard let tab = payload.descriptor.tab else { continue }
@@ -181,6 +178,9 @@ struct TabSelectionView: View {
 
     private func ensureValidSelection(with tabs: [TabModel]) {
         guard !tabs.isEmpty else { return }
+        if coordinator.currentView == .clipboard || coordinator.currentView == .usbDevices {
+            return
+        }
         if tabs.contains(where: { isSelected($0) }) {
             return
         }
