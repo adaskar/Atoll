@@ -2786,6 +2786,12 @@ private struct DevicesSettingsView: View {
                 .disabled(!enableUSBDeviceFeature)
                 .settingsHighlight(id: highlightID("USB Display mode"))
 
+                Defaults.Toggle(key: .usbTreeViewEnabled) {
+                    Text("Tree view (group sub-devices under parent hubs)")
+                }
+                .disabled(!enableUSBDeviceFeature)
+                .settingsHighlight(id: highlightID("Tree view (group sub-devices under parent hubs)"))
+
                 Defaults.Toggle(key: .showUSBDevicesIcon) {
                     Text("Show USB icon in the notch")
                 }

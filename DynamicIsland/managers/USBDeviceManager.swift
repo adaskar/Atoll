@@ -162,8 +162,10 @@ public struct USBDeviceItem: Identifiable, Equatable, Hashable, Sendable {
     public var driverName: String?
     public var activeProcessName: String?
     public var companionHubSummary: String?
+    public var parentHubID: UInt64?
     public var parentHubName: String?
     public var hubPortNumber: Int?
+    public var childDeviceIDs: [UInt64] = []
     public var connectedChildren: [String] = []
     public var portTransportsSummary: String?
     public var usbPDControllerSummary: String?
@@ -227,10 +229,21 @@ public struct USBDeviceItem: Identifiable, Equatable, Hashable, Sendable {
         return nil
     }
 
+    /// Short port/protocol tag describing how this device attaches to its parent hub (e.g. "HDMI", "Port 2", "Port 3").
+    public var hubPortBadge: String? {
+        if isDisplayConnection {
+            return displayShortProtocol ?? "Display"
+        }
+        if let hubPortNumber {
+            return "Port \(hubPortNumber)"
+        }
+        return nil
+    }
+
     public var parentRouteSummary: String? {
         guard let parentHubName else { return nil }
-        if let hubPortNumber {
-            return "via \(parentHubName) (Port \(hubPortNumber))"
+        if let badge = hubPortBadge {
+            return "via \(parentHubName) (\(badge))"
         }
         return "via \(parentHubName)"
     }
@@ -336,6 +349,16 @@ public struct USBDeviceItem: Identifiable, Equatable, Hashable, Sendable {
         }
         return "cable.connector.horizontal"
     }
+}
+
+// MARK: - Topology Tree Node
+
+public struct USBDeviceTreeNode: Identifiable, Equatable, Sendable {
+    public let device: USBDeviceItem
+    public let depth: Int
+    public let children: [USBDeviceTreeNode]
+
+    public var id: UInt64 { device.id }
 }
 
 // MARK: - HUD State
@@ -444,7 +467,7 @@ final class USBDeviceManager: ObservableObject {
             .store(in: &cancellables)
     }
 
-    // MARK: - Filtered Views
+    // MARK: - Filtered Views & Topology Tree
 
     /// External devices and DisplayPort/HDMI connections (excluding built-in internal controllers
     /// and standalone Billboard management endpoints whose info is merged onto the parent hub/device).
@@ -472,6 +495,73 @@ final class USBDeviceManager: ObservableObject {
         }
         let endpoints = candidates.filter { !$0.isHub }
         return endpoints.isEmpty ? candidates : endpoints
+    }
+
+    /// Returns all direct sub-devices (HDMI/DisplayPort monitors and USB peripherals) connected to `hub`.
+    func childDevices(for hub: USBDeviceItem) -> [USBDeviceItem] {
+        guard !hub.childDeviceIDs.isEmpty else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: externalDevices.map { ($0.id, $0) })
+        return hub.childDeviceIDs.compactMap { byID[$0] }
+    }
+
+    /// Hierarchical topology tree of connected devices for Tree View mode.
+    var displayedTreeNodes: [USBDeviceTreeNode] {
+        let items = displayedDevices
+        guard !items.isEmpty else { return [] }
+        let byID = Dictionary(uniqueKeysWithValues: items.map { ($0.id, $0) })
+
+        var childrenByParentID: [UInt64: [USBDeviceItem]] = [:]
+        var roots: [USBDeviceItem] = []
+
+        for item in items {
+            if let parentID = item.parentHubID, parentID != item.id, byID[parentID] != nil {
+                childrenByParentID[parentID, default: []].append(item)
+            } else {
+                roots.append(item)
+            }
+        }
+
+        // Sort roots so hubs with active sub-devices and high-bandwidth devices appear first
+        let sortedRoots = roots.sorted { lhs, rhs in
+            let lhsHasKids = !(childrenByParentID[lhs.id]?.isEmpty ?? true)
+            let rhsHasKids = !(childrenByParentID[rhs.id]?.isEmpty ?? true)
+            if lhsHasKids != rhsHasKids {
+                return lhsHasKids
+            }
+            if lhs.hasMountedStorage != rhs.hasMountedStorage {
+                return lhs.hasMountedStorage
+            }
+            if lhs.isDisplayConnection != rhs.isDisplayConnection {
+                return lhs.isDisplayConnection
+            }
+            let lhsSuper = lhs.speed?.isSuperSpeedOrFaster ?? false
+            let rhsSuper = rhs.speed?.isSuperSpeedOrFaster ?? false
+            if lhsSuper != rhsSuper {
+                return lhsSuper
+            }
+            return lhs.productName.localizedStandardCompare(rhs.productName) == .orderedAscending
+        }
+
+        var visited = Set<UInt64>()
+        func buildNode(_ device: USBDeviceItem, depth: Int) -> USBDeviceTreeNode {
+            visited.insert(device.id)
+            let rawKids = (childrenByParentID[device.id] ?? []).filter { !visited.contains($0.id) }
+            let sortedKids = rawKids.sorted { lhs, rhs in
+                if lhs.isDisplayConnection != rhs.isDisplayConnection {
+                    return lhs.isDisplayConnection
+                }
+                let portL = lhs.hubPortNumber ?? Int.max
+                let portR = rhs.hubPortNumber ?? Int.max
+                if portL != portR {
+                    return portL < portR
+                }
+                return lhs.productName.localizedStandardCompare(rhs.productName) == .orderedAscending
+            }
+            let childNodes = sortedKids.map { buildNode($0, depth: depth + 1) }
+            return USBDeviceTreeNode(device: device, depth: depth, children: childNodes)
+        }
+
+        return sortedRoots.map { buildNode($0, depth: 0) }
     }
 
     // MARK: - Lifecycle
@@ -1459,10 +1549,15 @@ final class USBDeviceManager: ObservableObject {
 
             let parentHub = devices[parentIdx]
             let portNum = USBDeviceItem.childHubPort(parent: parentLoc, child: childLoc)
+            devices[idx].parentHubID = parentHub.id
             devices[idx].parentHubName = parentHub.productName
             devices[idx].hubPortNumber = portNum
             if devices[idx].portName == nil {
                 devices[idx].portName = parentHub.portName
+            }
+
+            if !devices[parentIdx].childDeviceIDs.contains(devices[idx].id) {
+                devices[parentIdx].childDeviceIDs.append(devices[idx].id)
             }
 
             let childLabel: String
@@ -1518,13 +1613,15 @@ final class USBDeviceManager: ObservableObject {
                 })
             }
 
+            var parentHubIDForDisplay: UInt64?
             var parentHubNameForDisplay: String?
             if let hubIdx = associatedHubIdx {
+                parentHubIDForDisplay = devices[hubIdx].id
                 parentHubNameForDisplay = devices[hubIdx].productName
                 let childBadge = "\(disp.productName) (\(proto))"
-                if !devices[hubIdx].connectedChildren.insertOrContains(childBadge, at: 0) {
-                    // inserted at front so HDMI monitor is highlighted first on the hub
-                }
+                devices[hubIdx].connectedChildren.insertOrContains(childBadge, at: 0)
+                devices[hubIdx].childDeviceIDs.insertOrContains(disp.entryID, at: 0)
+
                 let videoSummaryParts = [proto, disp.productName, disp.resolutionSummary ?? disp.shortRateBadge].compactMap { $0 }
                 devices[hubIdx].videoOutputSummary = videoSummaryParts.joined(separator: " • ")
                 if isHDMI {
@@ -1567,8 +1664,10 @@ final class USBDeviceManager: ObservableObject {
                 driverName: "IOPortTransportStateDisplayPort",
                 activeProcessName: nil,
                 companionHubSummary: nil,
+                parentHubID: parentHubIDForDisplay,
                 parentHubName: parentHubNameForDisplay,
                 hubPortNumber: nil,
+                childDeviceIDs: [],
                 connectedChildren: [],
                 portTransportsSummary: transportsSummary,
                 usbPDControllerSummary: portCtx?.usbPDControllerSummary,
@@ -1585,6 +1684,23 @@ final class USBDeviceManager: ObservableObject {
                 displayManufactureDate: disp.manufactureDate
             )
             devices.append(displayItem)
+        }
+
+        // Sort each hub's childDeviceIDs so DisplayPort/HDMI comes first, then hubPortNumber ascending
+        let deviceByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        for idx in devices.indices where !devices[idx].childDeviceIDs.isEmpty {
+            devices[idx].childDeviceIDs.sort { lhsID, rhsID in
+                guard let lhs = deviceByID[lhsID], let rhs = deviceByID[rhsID] else { return false }
+                if lhs.isDisplayConnection != rhs.isDisplayConnection {
+                    return lhs.isDisplayConnection
+                }
+                let portL = lhs.hubPortNumber ?? Int.max
+                let portR = rhs.hubPortNumber ?? Int.max
+                if portL != portR {
+                    return portL < portR
+                }
+                return lhs.productName.localizedStandardCompare(rhs.productName) == .orderedAscending
+            }
         }
 
         return devices
@@ -1711,7 +1827,12 @@ final class USBDeviceManager: ObservableObject {
             ?? (dict["kUSBProductString"] as? String)
             ?? di_getIOName(service)
             ?? "USB Device"
-        let productName = rawProduct.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedProduct = rawProduct.trimmingCharacters(in: .whitespacesAndNewlines)
+        let productName = USBKnownVendors.refinedProductName(
+            vendorID: vendorID,
+            productID: productID,
+            rawName: trimmedProduct.isEmpty ? "USB Device" : trimmedProduct
+        )
         let serialNumber = ((dict["USB Serial Number"] as? String)
             ?? (dict["kUSBSerialNumberString"] as? String))?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2117,6 +2238,19 @@ private enum USBKnownDisplayVendors {
 private enum USBKnownVendors {
     static func name(for vendorID: UInt16) -> String? {
         table[vendorID]
+    }
+
+    static func refinedProductName(vendorID: UInt16, productID: UInt16, rawName: String) -> String {
+        if vendorID == 0x046D {
+            switch productID {
+            case 0xC52B: return "USB Receiver (Unifying)"
+            case 0xC534: return "USB Receiver (Nano)"
+            case 0xC548: return "USB Receiver (Logi Bolt)"
+            case 0xC539, 0xC53A, 0xC547: return "USB Receiver (Lightspeed)"
+            default: break
+            }
+        }
+        return rawName
     }
 
     private static let table: [UInt16: String] = [
