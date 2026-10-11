@@ -10,7 +10,6 @@
 // with DynaLoader and calls adapter entry points.
 
 import AppKit
-import CoreAudio
 import Foundation
 
 private typealias InfoCallback = @convention(block) (NSDictionary?) -> Void
@@ -30,6 +29,7 @@ private var watching = false
 private var previousArtwork: Data?
 /// Watch only: where the last reply put its recording, by the sample it read.
 private var lastPosition: (revision: UUID, sample: Double, timestamp: Date?, elapsed: Double, rate: Double, at: Date)?
+private var lastEmittedPausedData: Data?
 /// Set by the watch process: schedules another read at a system uptime.
 private var readAt: ((TimeInterval) -> Void)?
 
@@ -46,7 +46,7 @@ private let emissionLock = NSLock()
 func encodedReply(_ reply: [String: Any]) -> Data {
     let finite = reply.filter { ($0.value as? Double)?.isFinite != false }
     guard JSONSerialization.isValidJSONObject(finite),
-          let data = try? JSONSerialization.data(withJSONObject: finite) else {
+          let data = try? JSONSerialization.data(withJSONObject: finite, options: [.sortedKeys]) else {
         return Data("{\"error\":\"json\"}".utf8)
     }
     return data
@@ -79,9 +79,22 @@ func settlePosition(_ reply: inout [String: Any], sample: (elapsed: Double, time
                                    age: sample.timestamp.map { max(0, now.timeIntervalSince($0)) } ?? 0,
                                    rate: reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? Double ?? 0,
                                    isPlaying: isPlaying, continuing: continuing)
+    let anchorDate: Date = {
+        if settled.rate == 0,
+           let last = lastPosition,
+           last.revision == revision,
+           last.sample == sample.elapsed,
+           last.timestamp == sample.timestamp,
+           last.rate == 0,
+           abs(last.elapsed - settled.elapsed) < 0.0001 {
+            return last.at
+        }
+        return now
+    }()
     reply["kMRMediaRemoteNowPlayingInfoElapsedTime"] = settled.elapsed
+    reply["settledTimestampEpochMicros"] = Double(Int64(anchorDate.timeIntervalSince1970 * 1_000_000))
     if isPlaying != nil { reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] = settled.rate }
-    lastPosition = revision.map { ($0, sample.elapsed, sample.timestamp, settled.elapsed, settled.rate, now) }
+    lastPosition = revision.map { ($0, sample.elapsed, sample.timestamp, settled.elapsed, settled.rate, anchorDate) }
 }
 
 func emit(_ reply: [String: Any]) {
@@ -113,7 +126,8 @@ func emit(_ reply: [String: Any]) {
         payload["elapsedTime"] = elapsed
         payload["elapsedTimeMicros"] = elapsed * 1_000_000
     }
-    let nowMicros = Double(Int64(Date().timeIntervalSince1970 * 1_000_000))
+    let settledMicros = finalReply.removeValue(forKey: "settledTimestampEpochMicros") as? Double
+    let nowMicros = settledMicros ?? Double(Int64(Date().timeIntervalSince1970 * 1_000_000))
     payload["timestampEpochMicros"] = nowMicros
 
     if let rate = (reply["kMRMediaRemoteNowPlayingInfoPlaybackRate"] as? NSNumber)?.doubleValue ?? (reply["playbackRate"] as? Double) {
@@ -136,9 +150,32 @@ func emit(_ reply: [String: Any]) {
     finalReply["diff"] = false
     finalReply["payload"] = payload
 
+    let isTransientReply = reply["queueRequest"] != nil || reply["queueAction"] != nil || reply["error"] != nil
+    if watching && !isPlaying && !isTransientReply {
+        var comparisonPayload = payload
+        if settledMicros == nil {
+            comparisonPayload.removeValue(forKey: "timestampEpochMicros")
+        }
+        var comparisonReply = finalReply
+        comparisonReply["payload"] = comparisonPayload
+        let signatureData = encodedReply(comparisonReply)
+        emissionLock.lock()
+        if signatureData == lastEmittedPausedData {
+            emissionLock.unlock()
+            return
+        }
+        lastEmittedPausedData = signatureData
+        let data = encodedReply(finalReply)
+        FileHandle.standardOutput.write(data)
+        FileHandle.standardOutput.write(Data("\n".utf8))
+        emissionLock.unlock()
+        return
+    }
+
     let data = encodedReply(finalReply)
     emissionLock.lock()
     defer { emissionLock.unlock() }
+    lastEmittedPausedData = nil
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data("\n".utf8))
 }
@@ -158,16 +195,7 @@ public func vorssaintNowPlayingGet() {
     if watching, selected == nil {
         NotchNativePlayback.publish(nil)
         previousArtwork = nil
-        emit(NotchNativePlayback.sourceReply.merging([
-            "isPlaying": false,
-            "playing": false,
-            "title": "",
-            "artist": "",
-            "album": "",
-            "kMRMediaRemoteNowPlayingInfoTitle": "",
-            "kMRMediaRemoteNowPlayingInfoArtist": "",
-            "kMRMediaRemoteNowPlayingInfoAlbum": ""
-        ]) { _, new in new })
+        emit(NotchNativePlayback.sourceReply)
         NotchNativeQueue.observe([:])
         return
     }
@@ -221,11 +249,7 @@ public func vorssaintNowPlayingGet() {
         set("displayID", selected.applicationBundleIdentifier ?? selected.bundleIdentifier)
         state.enter()
         NotchNativePlayback.readPlaybackState(selected, queue: queue) { isPlaying in
-            if selected.resolvedIsPlaying == false {
-                set("isPlaying", false)
-            } else {
-                set("isPlaying", isPlaying ?? selected.resolvedIsPlaying)
-            }
+            set("isPlaying", isPlaying)
             state.leave()
         }
     } else { getInfo(queue, receiveInfo) }
@@ -363,65 +387,6 @@ public func vorssaintNowPlayingWatch() {
         let delay = max(0, uptime - ProcessInfo.processInfo.systemUptime)
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { refresh() }
     }
-    var observedAudioObjects = Set<AudioObjectID>()
-    let audioListenerBlock: AudioObjectPropertyListenerBlock = { _, _ in
-        refresh()
-    }
-    func syncAudioProcessListeners() {
-        var listAddr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyProcessObjectList,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var listSize: UInt32 = 0
-        guard AudioObjectGetPropertyDataSize(
-            AudioObjectID(kAudioObjectSystemObject),
-            &listAddr,
-            0,
-            nil,
-            &listSize
-        ) == noErr, listSize > 0 else { return }
-        let count = Int(listSize) / MemoryLayout<AudioObjectID>.size
-        var objects = [AudioObjectID](repeating: 0, count: count)
-        guard AudioObjectGetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &listAddr,
-            0,
-            nil,
-            &listSize,
-            &objects
-        ) == noErr else { return }
-        for obj in objects where observedAudioObjects.insert(obj).inserted {
-            var outAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioProcessPropertyIsRunningOutput,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            _ = AudioObjectAddPropertyListenerBlock(obj, &outAddr, DispatchQueue.main, audioListenerBlock)
-            var runAddr = AudioObjectPropertyAddress(
-                mSelector: kAudioProcessPropertyIsRunning,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            _ = AudioObjectAddPropertyListenerBlock(obj, &runAddr, DispatchQueue.main, audioListenerBlock)
-        }
-    }
-    var processListAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyProcessObjectList,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    let processListListener: AudioObjectPropertyListenerBlock = { _, _ in
-        syncAudioProcessListeners()
-        refresh()
-    }
-    _ = AudioObjectAddPropertyListenerBlock(
-        AudioObjectID(kAudioObjectSystemObject),
-        &processListAddr,
-        DispatchQueue.main,
-        processListListener
-    )
-    syncAudioProcessListeners()
     let observers = names.map { name in
         NotificationCenter.default.addObserver(forName: Notification.Name(name), object: nil, queue: .main) { _ in refresh() }
     }
@@ -442,7 +407,7 @@ public func vorssaintNowPlayingWatch() {
         }
     }
     reader.async { vorssaintNowPlayingGet() }
-    withExtendedLifetime((observers, termination, audioListenerBlock, processListListener)) { RunLoop.main.run() }
+    withExtendedLifetime((observers, termination)) { RunLoop.main.run() }
 }
 
 private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
@@ -460,14 +425,12 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
     case .queueStop: NotchNativeQueue.configure(nil); return
     case .queuePlay(let selected): NotchNativeQueue.play(selected); return
     case .shuffle(let mode):
-        NotchNativePlayback.noteCommandSent()
         typealias SetShuffle = @convention(c) (Int) -> Void
         if let setShuffle = function(handle, "MRMediaRemoteSetShuffleMode", as: SetShuffle.self) {
             setShuffle(mode)
         }
         return
     case .repeatMode(let mode):
-        NotchNativePlayback.noteCommandSent()
         typealias SetRepeat = @convention(c) (Int) -> Void
         if let setRepeat = function(handle, "MRMediaRemoteSetRepeatMode", as: SetRepeat.self) {
             setRepeat(mode)
@@ -475,7 +438,6 @@ private func sendPlaybackCommand(_ request: NotchPlaybackRequest) {
         return
     default: break
     }
-    NotchNativePlayback.noteCommandSent()
     let target = request.context.flatMap { NotchNativePlayback.validatedTarget(for: $0) } ?? NotchNativePlayback.target
     let identifier: Int32
     var options: CFDictionary?

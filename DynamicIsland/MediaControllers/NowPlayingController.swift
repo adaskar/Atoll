@@ -536,10 +536,19 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
             (diff ? self.playbackState.bundleIdentifier : "")
         )
 
+        if !wasPlaying && !newPlaybackState.isPlaying,
+           abs(newPlaybackState.currentTime - self.playbackState.currentTime) < 0.001,
+           newPlaybackState.title == self.playbackState.title,
+           newPlaybackState.bundleIdentifier == self.playbackState.bundleIdentifier {
+            newPlaybackState.lastUpdated = self.playbackState.lastUpdated
+        }
+
         if !newPlaybackState.title.isEmpty {
             deferredEmptyUpdateTask?.cancel()
             deferredEmptyUpdateTask = nil
-            self.playbackState = newPlaybackState
+            if self.playbackState != newPlaybackState {
+                self.playbackState = newPlaybackState
+            }
         } else if !self.playbackState.title.isEmpty {
             let elapsedSinceCommand = now.timeIntervalSince(lastCommandTransitionAt)
             if elapsedSinceCommand < Self.commandTransitionGracePeriod {
@@ -548,12 +557,16 @@ final class NowPlayingController: ObservableObject, MediaControllerProtocol {
                 deferredEmptyUpdateTask = Task { [weak self] in
                     try? await Task.sleep(for: .seconds(remaining))
                     guard !Task.isCancelled, let self else { return }
-                    self.playbackState = newPlaybackState
+                    if self.playbackState != newPlaybackState {
+                        self.playbackState = newPlaybackState
+                    }
                 }
                 return
             }
-            self.playbackState = newPlaybackState
-        } else {
+            if self.playbackState != newPlaybackState {
+                self.playbackState = newPlaybackState
+            }
+        } else if self.playbackState != newPlaybackState {
             self.playbackState = newPlaybackState
         }
     }

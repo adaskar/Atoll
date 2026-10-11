@@ -893,15 +893,17 @@ struct ContentView: View {
     }
 
     private var rootBodyView: some View {
-        ZStack(alignment: .top) {
+        let notchSize = dynamicNotchSize
+        let islandMode = isDynamicIslandMode
+        return ZStack(alignment: .top) {
             configuredMainLayout
         }
         .frame(
-            maxWidth: (dynamicNotchSize.width + (vm.notchState == .open ? 24 : 0) + (isDynamicIslandMode ? dynamicIslandShadowInset * 2 : 0)).rounded(),
-            maxHeight: (dynamicNotchSize.height + (vm.notchState == .open ? 12 : 0) + (isIslandMode ? 0 : notchTopScreenBleedAmount) + (isDynamicIslandMode ? dynamicIslandTopOffset + dynamicIslandShadowInset * 2 : currentShadowPadding)).rounded(),
+            maxWidth: (notchSize.width + (vm.notchState == .open ? 24 : 0) + (islandMode ? dynamicIslandShadowInset * 2 : 0)).rounded(),
+            maxHeight: (notchSize.height + (vm.notchState == .open ? 12 : 0) + (isIslandMode ? 0 : notchTopScreenBleedAmount) + (islandMode ? dynamicIslandTopOffset + dynamicIslandShadowInset * 2 : currentShadowPadding)).rounded(),
             alignment: .top
         )
-        .animation(.smooth(duration: 0.22), value: dynamicNotchSize.height)
+        .animation(.smooth(duration: 0.22), value: notchSize.height)
         .animation(nil, value: vm.notchState)
         .background(dragDetector, alignment: .top)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)

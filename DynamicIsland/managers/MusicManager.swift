@@ -1446,21 +1446,34 @@ class MusicManager: ObservableObject {
 
     private func updateIdleState(state: Bool) {
         if state {
-            isPlayerIdle = false
+            if isPlayerIdle {
+                isPlayerIdle = false
+            }
             debounceIdleTask?.cancel()
+            debounceIdleTask = nil
         } else {
-            debounceIdleTask?.cancel()
             if !hasActiveSession || songTitle.isEmpty {
-                withAnimation {
-                    self.isPlayerIdle = true
+                debounceIdleTask?.cancel()
+                debounceIdleTask = nil
+                if !isPlayerIdle {
+                    withAnimation {
+                        self.isPlayerIdle = true
+                    }
                 }
+                return
+            }
+            if isPlayerIdle || debounceIdleTask != nil {
                 return
             }
             debounceIdleTask = Task { [weak self] in
                 guard let self = self else { return }
                 try? await Task.sleep(for: .seconds(Defaults[.waitInterval]))
-                withAnimation {
-                    self.isPlayerIdle = !self.isPlaying
+                guard !Task.isCancelled else { return }
+                self.debounceIdleTask = nil
+                if self.isPlayerIdle != !self.isPlaying {
+                    withAnimation {
+                        self.isPlayerIdle = !self.isPlaying
+                    }
                 }
             }
         }
